@@ -1605,8 +1605,9 @@ async def admin_delete_announcement(announcement_id: int):
 async def admin_list_scheduler_jobs():
     """列出全部内置定时任务及其计划时间、上次运行情况。"""
     from src.services.scheduler_service import SchedulerService
+    jobs = await SchedulerService.list_jobs()
     return api_response(True, "获取成功", {
-        'jobs': SchedulerService.list_jobs(),
+        'jobs': jobs,
     })
 
 
@@ -1625,4 +1626,34 @@ async def admin_trigger_scheduler_job(job_id: str):
         'job_id': job_id,
         'last_run': record,
     }, code=200 if ok else 400)
+
+
+@admin_bp.route('/scheduler/jobs/<string:job_id>/last-run', methods=['GET'])
+@require_auth
+@require_admin
+async def admin_scheduler_job_last_run(job_id: str):
+    """获取指定 job 的最近一次完整运行记录（含日志正文）。"""
+    from src.services.scheduler_service import SchedulerService
+    detail = await SchedulerService.get_last_run_detail(job_id)
+    if not detail:
+        return api_response(True, "暂无运行记录", {'job_id': job_id, 'last_run': None})
+    return api_response(True, "获取成功", {'job_id': job_id, 'last_run': detail})
+
+
+@admin_bp.route('/scheduler/jobs/<string:job_id>/history', methods=['GET'])
+@require_auth
+@require_admin
+async def admin_scheduler_job_history(job_id: str):
+    """获取指定 job 的历史运行列表。"""
+    from src.services.scheduler_service import SchedulerService
+    try:
+        limit = int(request.args.get('limit', 20))
+    except (TypeError, ValueError):
+        limit = 20
+    history = await SchedulerService.get_job_history(job_id, limit=limit)
+    return api_response(True, "获取成功", {
+        'job_id': job_id,
+        'history': history,
+        'total': len(history),
+    })
 

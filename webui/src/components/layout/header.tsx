@@ -3,19 +3,23 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useState } from "react";
+import { useTheme } from "next-themes";
 import { useAuthStore } from "@/store/auth";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
 import { cn } from "@/lib/utils";
 import { adminNavItems, userNavItems } from "@/components/layout/sidebar";
-import { Menu, Sparkles } from "lucide-react";
+import { Menu, Moon, Sparkles, Sun } from "lucide-react";
 
 export function Header() {
   const pathname = usePathname();
   const { user, logout } = useAuthStore();
+  const { theme, resolvedTheme, setTheme } = useTheme();
   const [mobileOpen, setMobileOpen] = useState(false);
   const isAdmin = user?.role === 0;
+  const activeTheme = resolvedTheme || theme || "light";
+  const isDark = activeTheme === "dark";
 
   return (
     <header className="sticky top-0 z-30 px-4 pt-4 md:px-6 md:pt-6 xl:px-8">
@@ -78,7 +82,16 @@ export function Header() {
                 )}
               </nav>
 
-              <div className="mt-4 border-t pt-4">
+              <div className="mt-4 grid grid-cols-2 gap-2 border-t pt-4">
+                <Button
+                  variant="outline"
+                  className="h-11 w-full"
+                  onClick={() => setTheme(isDark ? "light" : "dark")}
+                  title={`当前主题：${isDark ? "暗色" : "浅色"}`}
+                >
+                  {isDark ? <Moon className="mr-2 h-4 w-4" /> : <Sun className="mr-2 h-4 w-4" />}
+                  {isDark ? "暗色" : "浅色"}
+                </Button>
                 <Button
                   variant="outline"
                   className="h-11 w-full"

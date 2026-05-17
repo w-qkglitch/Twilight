@@ -275,6 +275,77 @@ def singleton(cls):
     return get_instance
 
 
+# ==================== 限流（内存实现） ====================
+
+# 命名空间 → key → (count, window_started_at)
+# key 通常是 IP / UID / "endpoint:ip" 组合；同一进程内有效，重启清零。
+_RATE_BUCKETS: dict[str, dict[str, list[int]]] = {}
+# 每个命名空间最多跟踪多少 key，避免被人塞爆内存
+_RATE_MAX_KEYS_PER_BUCKET = 50000
+
+
+def _rate_bucket(namespace: str) -> dict[str, list[int]]:
+    bucket = _RATE_BUCKETS.get(namespace)
+    if bucket is None:
+        bucket = {}
+        _RATE_BUCKETS[namespace] = bucket
+    return bucket
+
+
+def _rate_evict(bucket: dict[str, list[int]], window_seconds: int, now: int) -> None:
+    """淘汰窗口外的 key，并对总量限上限。"""
+    stale = [k for k, v in bucket.items() if now - v[1] > window_seconds]
+    for k in stale:
+        bucket.pop(k, None)
+    if len(bucket) <= _RATE_MAX_KEYS_PER_BUCKET:
+        return
+    # 按 window 起始时间从旧到新淘汰
+    extra = len(bucket) - _RATE_MAX_KEYS_PER_BUCKET
+    for k, _ in sorted(bucket.items(), key=lambda kv: kv[1][1])[:extra]:
+        bucket.pop(k, None)
+
+
+def rate_limit_check(
+    namespace: str,
+    key: str,
+    *,
+    max_requests: int,
+    window_seconds: int,
+) -> tuple[bool, int]:
+    """检查并消费一次配额。
+
+    返回 `(allowed, retry_after_seconds)`：
+    - `allowed=True`：消费成功，调用者继续处理；retry_after 为 0。
+    - `allowed=False`：被限流；retry_after 是窗口剩余秒数（>= 1）。
+
+    阈值 <= 0 视为禁用（始终允许）。
+    """
+    if max_requests <= 0 or window_seconds <= 0:
+        return True, 0
+
+    now = timestamp()
+    bucket = _rate_bucket(namespace)
+    _rate_evict(bucket, window_seconds, now)
+
+    record = bucket.get(key)
+    if record is None or now - record[1] > window_seconds:
+        bucket[key] = [1, now]
+        return True, 0
+
+    if record[0] >= max_requests:
+        return False, max(1, window_seconds - (now - record[1]))
+
+    record[0] += 1
+    return True, 0
+
+
+def rate_limit_reset(namespace: str, key: str) -> None:
+    """显式重置一个 key 的计数，登录成功等场景使用。"""
+    bucket = _RATE_BUCKETS.get(namespace)
+    if bucket:
+        bucket.pop(key, None)
+
+
 # ==================== 日志工具 ====================
 
 def setup_logging(

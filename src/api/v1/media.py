@@ -19,6 +19,7 @@ logger = logging.getLogger(__name__)
 # ==================== 媒体搜索 ====================
 
 @media_bp.route('/search', methods=['GET'])
+@require_auth
 async def search_media():
     """
     统一媒体搜索
@@ -106,6 +107,7 @@ async def search_media():
 
 
 @media_bp.route('/search/tmdb', methods=['GET'])
+@require_auth
 async def search_tmdb():
     """
     仅搜索 TMDB
@@ -142,6 +144,7 @@ async def search_tmdb():
 
 
 @media_bp.route('/search/bangumi', methods=['GET'])
+@require_auth
 async def search_bangumi():
     """
     仅搜索 Bangumi
@@ -359,6 +362,7 @@ async def get_bangumi_detail(bgm_id: int):
 # ==================== 库存检查 ====================
 
 @media_bp.route('/inventory/check', methods=['POST'])
+@require_auth
 async def check_inventory():
     """
     检查媒体库存（支持季度检查）
@@ -456,6 +460,7 @@ async def check_inventory():
 
 
 @media_bp.route('/inventory/search', methods=['GET'])
+@require_auth
 async def search_inventory():
     """
     搜索库存

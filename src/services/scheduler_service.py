@@ -1,10 +1,11 @@
 import asyncio
 import logging
 import time
-from typing import Awaitable, Callable, Optional
+from typing import Any, Awaitable, Callable, Optional
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from src.config import RegisterConfig, SchedulerConfig, TelegramConfig
+from src.db.scheduler_run import SchedulerRunOperate
 from src.db.user import UserOperate
 from src.services import get_emby_client, EmbyService
 from src.core.utils import timestamp, format_duration
@@ -13,10 +14,36 @@ from src.services.user_service import UserService
 logger = logging.getLogger(__name__)
 
 
+class RunContext:
+    """传给 job 函数的上下文：累加 summary 字段、追加日志。
+
+    用法：
+        async def my_job(ctx: RunContext):
+            ctx.log("开始处理…")
+            ctx.summary['scanned'] = 10
+            ctx.summary['disabled'] = 0
+    """
+
+    def __init__(self, job_id: str):
+        self.job_id = job_id
+        self.summary: dict[str, Any] = {}
+        self.logs: list[str] = []
+        self._max_logs = 800  # 内存里挡一道，落库会再截断
+
+    def log(self, message: str) -> None:
+        line = f"[{time.strftime('%H:%M:%S')}] {message}"
+        if len(self.logs) >= self._max_logs:
+            # 丢掉最早的，保留最新
+            del self.logs[: len(self.logs) - self._max_logs + 1]
+        self.logs.append(line)
+        logger.info(f"[{self.job_id}] {message}")
+
+
 class SchedulerService:
     _scheduler = None
     _scheduler_loop: Optional[asyncio.AbstractEventLoop] = None
-    # 每个 job 的最近一次执行情况：{ job_id: {status, started_at, finished_at, error} }
+    # 每个 job 的最近一次执行情况（运行中态用，DB 持久化负责完成态）
+    # { job_id: {status, started_at, finished_at, error, summary?, trigger?} }
     _last_runs: dict[str, dict] = {}
     # 当前正在「运行中」的 job ID（用于幂等避免重复触发）
     _running: set[str] = set()
@@ -67,24 +94,35 @@ class SchedulerService:
     ]
 
     @classmethod
-    def _record_run_start(cls, job_id: str) -> int:
+    def _record_run_start(cls, job_id: str, trigger: str) -> int:
         started = int(time.time())
         cls._last_runs[job_id] = {
             'status': 'running',
             'started_at': started,
             'finished_at': None,
             'error': None,
+            'summary': None,
+            'trigger': trigger,
         }
         cls._running.add(job_id)
         return started
 
     @classmethod
-    def _record_run_end(cls, job_id: str, started: int, error: Optional[str]) -> None:
+    def _record_run_end(
+        cls,
+        job_id: str,
+        started: int,
+        trigger: str,
+        error: Optional[str],
+        summary: Optional[dict],
+    ) -> None:
         cls._last_runs[job_id] = {
             'status': 'failed' if error else 'success',
             'started_at': started,
             'finished_at': int(time.time()),
             'error': (error or None) and str(error)[:500],
+            'summary': summary or None,
+            'trigger': trigger,
         }
         cls._running.discard(job_id)
 
@@ -92,34 +130,66 @@ class SchedulerService:
     async def _run_with_tracking(
         cls,
         job_id: str,
-        fn: Callable[[], Awaitable[None]],
+        fn: Callable[..., Awaitable[Any]],
         *,
         trigger: str = 'scheduled',
     ) -> dict:
-        """执行 job 并记录 last-run 状态。供 APScheduler 调度与管理员手动触发共用。"""
+        """执行 job 并把 last-run 落库。供 APScheduler 调度与管理员手动触发共用。
+
+        `fn` 既兼容老签名 `async def f()`，也接受新签名 `async def f(ctx: RunContext)`。
+        """
         if job_id in cls._running:
             return cls._last_runs.get(job_id, {'status': 'running'})
 
-        started = cls._record_run_start(job_id)
+        started = cls._record_run_start(job_id, trigger)
         logger.info(f"▶️ 任务 {job_id} 开始执行 ({trigger})")
+
+        # 落库一条「运行中」记录，结束后回填
+        try:
+            run_id = await SchedulerRunOperate.start_run(job_id, trigger=trigger)
+        except Exception as exc:  # pragma: no cover - 数据库不可用时不阻塞主任务
+            logger.warning(f"无法创建 scheduler_run 记录: {exc}")
+            run_id = 0
+
+        ctx = RunContext(job_id)
         error_text: Optional[str] = None
         try:
-            await fn()
+            await fn(ctx)
         except Exception as exc:
             error_text = str(exc) or exc.__class__.__name__
+            ctx.log(f"❌ 任务执行异常: {exc}")
             logger.exception(f"❌ 任务 {job_id} 执行异常: {exc}")
         finally:
-            cls._record_run_end(job_id, started, error_text)
+            cls._record_run_end(
+                job_id,
+                started,
+                trigger,
+                error_text,
+                dict(ctx.summary) if ctx.summary else None,
+            )
+            if run_id:
+                try:
+                    await SchedulerRunOperate.finish_run(
+                        run_id,
+                        status='failed' if error_text else 'success',
+                        error=error_text,
+                        summary=ctx.summary or None,
+                        logs=ctx.logs or None,
+                    )
+                    await SchedulerRunOperate.trim_history(job_id)
+                except Exception as exc:  # pragma: no cover
+                    logger.warning(f"无法回填 scheduler_run #{run_id}: {exc}")
 
         result = cls._last_runs[job_id]
+        elapsed = (result['finished_at'] or started) - started
         if error_text:
-            logger.info(f"⏹️ 任务 {job_id} 失败结束 (耗时 {result['finished_at'] - started}s)")
+            logger.info(f"⏹️ 任务 {job_id} 失败结束 (耗时 {elapsed}s)")
         else:
-            logger.info(f"✅ 任务 {job_id} 完成 (耗时 {result['finished_at'] - started}s)")
+            logger.info(f"✅ 任务 {job_id} 完成 (耗时 {elapsed}s)")
         return result
 
     @classmethod
-    def _make_scheduled(cls, job_id: str, fn: Callable[[], Awaitable[None]]):
+    def _make_scheduled(cls, job_id: str, fn: Callable[..., Awaitable[Any]]):
         """生成给 APScheduler 用的 async wrapper（带 last-run 追踪）。"""
         async def runner():
             await cls._run_with_tracking(job_id, fn, trigger='scheduled')
@@ -177,8 +247,12 @@ class SchedulerService:
         return True, "已触发", cls._last_runs.get(job_id, {'status': 'running'})
 
     @classmethod
-    def list_jobs(cls) -> list[dict]:
-        """返回 job 列表 + 计划时间 + 上次运行情况，供管理员前端展示。"""
+    async def list_jobs(cls) -> list[dict]:
+        """返回 job 列表 + 计划时间 + 上次运行情况，供管理员前端展示。
+
+        last_run 优先取数据库里的最后一条（重启后仍有效），
+        正在运行中的 job 用内存 `_last_runs` 覆盖以拿到「未结束」状态。
+        """
         sched = cls._scheduler
         scheduled_map: dict[str, object] = {}
         if sched is not None and sched.running:
@@ -196,15 +270,38 @@ class SchedulerService:
                     next_run = int(scheduled.next_run_time.timestamp())
                 trigger = scheduled.trigger
                 schedule_str = str(trigger) if trigger else None
+
+            is_running = jid in cls._running
+            last_run: Optional[dict]
+            if is_running:
+                last_run = cls._last_runs.get(jid)
+            else:
+                try:
+                    last_run = await SchedulerRunOperate.get_last_run_summary(jid)
+                except Exception as exc:  # pragma: no cover
+                    logger.warning(f"读取 scheduler_run 失败: {exc}")
+                    last_run = cls._last_runs.get(jid)
+
             items.append({
                 **definition,
                 'enabled': scheduled is not None,
                 'schedule': schedule_str,
                 'next_run_at': next_run,
-                'last_run': cls._last_runs.get(jid),
-                'is_running': jid in cls._running,
+                'last_run': last_run,
+                'is_running': is_running,
             })
         return items
+
+    @classmethod
+    async def get_job_history(cls, job_id: str, *, limit: int = 20) -> list[dict]:
+        return await SchedulerRunOperate.get_history(job_id, limit=limit)
+
+    @classmethod
+    async def get_last_run_detail(cls, job_id: str) -> Optional[dict]:
+        """完整的最近一次运行（含 logs）。"""
+        if job_id in cls._running:
+            return cls._last_runs.get(job_id)
+        return await SchedulerRunOperate.get_last_run(job_id)
 
     @classmethod
     def get_scheduler(cls):
@@ -213,119 +310,142 @@ class SchedulerService:
         return cls._scheduler
 
     @staticmethod
-    async def check_expired_users():
+    async def check_expired_users(ctx: RunContext):
         """检查过期用户并禁用"""
-        logger.info("🔍 开始检查过期用户...")
+        ctx.log("🔍 开始检查过期用户...")
         try:
             expired_users = await UserOperate.get_expired_users()
+            ctx.summary['scanned'] = len(expired_users)
+            ctx.summary['disabled'] = 0
+            ctx.summary['failed'] = 0
             if not expired_users:
-                logger.info("✅ 没有需要处理的过期用户")
+                ctx.log("✅ 没有需要处理的过期用户")
                 return
-            
-            logger.info(f"📋 发现 {len(expired_users)} 个过期用户")
+
+            ctx.log(f"📋 发现 {len(expired_users)} 个过期用户")
             emby = get_emby_client()
-            disabled_count = 0
-            failed_count = 0
-            
+
             for user in expired_users:
                 try:
                     if user.EMBYID:
                         await emby.set_user_enabled(user.EMBYID, False)
                     user.ACTIVE_STATUS = False
                     await UserOperate.update_user(user)
-                    disabled_count += 1
-                    logger.info(f"  ⏹️ 已禁用: {user.USERNAME} (UID: {user.UID})")
+                    ctx.summary['disabled'] += 1
+                    ctx.log(f"  ⏹️ 已禁用: {user.USERNAME} (UID: {user.UID})")
                 except Exception as e:
-                    failed_count += 1
-                    logger.error(f"  ❌ 禁用失败: {user.USERNAME} - {e}")
-            logger.info(f"✅ 过期用户检查完成: 禁用 {disabled_count} 个, 失败 {failed_count} 个")
+                    ctx.summary['failed'] += 1
+                    ctx.log(f"  ❌ 禁用失败: {user.USERNAME} - {e}")
+            ctx.log(
+                f"✅ 过期用户检查完成: 禁用 {ctx.summary['disabled']} 个, "
+                f"失败 {ctx.summary['failed']} 个"
+            )
         except Exception as e:
-            logger.error(f"❌ 检查过期用户时发生错误: {e}")
+            ctx.log(f"❌ 检查过期用户时发生错误: {e}")
+            raise
 
     @staticmethod
-    async def check_expiring_users():
+    async def check_expiring_users(ctx: RunContext):
         """检查即将过期的用户（用于提醒）"""
-        logger.info("🔔 检查即将过期的用户...")
+        ctx.log("🔔 检查即将过期的用户...")
         try:
             expiring_users = await UserOperate.get_expiring_users(days=3)
+            ctx.summary['scanned'] = len(expiring_users)
             if not expiring_users:
-                logger.info("✅ 没有即将过期的用户")
+                ctx.log("✅ 没有即将过期的用户")
                 return
-            
-            logger.info(f"📋 发现 {len(expiring_users)} 个即将过期的用户:")
+
+            ctx.log(f"📋 发现 {len(expiring_users)} 个即将过期的用户:")
             current = timestamp()
             for user in expiring_users:
                 remaining = user.EXPIRED_AT - current
                 remaining_str = format_duration(remaining)
-                logger.info(f"  ⚠️ {user.USERNAME} (UID: {user.UID}) - {remaining_str}后过期")
-            
-            # TODO: 实现通知功能
+                ctx.log(f"  ⚠️ {user.USERNAME} (UID: {user.UID}) - {remaining_str}后过期")
         except Exception as e:
-            logger.error(f"❌ 检查即将过期用户时发生错误: {e}")
+            ctx.log(f"❌ 检查即将过期用户时发生错误: {e}")
+            raise
 
     @staticmethod
-    async def cleanup_inactive_sessions():
+    async def cleanup_inactive_sessions(ctx: RunContext):
         """清理不活跃的会话"""
-        logger.info("🧹 清理不活跃会话...")
+        ctx.log("🧹 清理不活跃会话...")
         try:
             emby = get_emby_client()
             sessions = await emby.get_sessions()
             active = len([s for s in sessions if s.is_active])
             total = len(sessions)
-            logger.info(f"📊 当前会话: {active} 活跃 / {total} 总计")
+            ctx.summary['active'] = active
+            ctx.summary['total'] = total
+            ctx.log(f"📊 当前会话: {active} 活跃 / {total} 总计")
         except Exception as e:
-            logger.error(f"❌ 清理会话时发生错误: {e}")
+            ctx.log(f"❌ 清理会话时发生错误: {e}")
+            raise
 
     @staticmethod
-    async def daily_stats():
+    async def daily_stats(ctx: RunContext):
         """每日统计"""
-        logger.info("📊 生成每日统计...")
+        ctx.log("📊 生成每日统计...")
         try:
             from src.db.regcode import RegCodeOperate
             registered = await UserOperate.get_registered_users_count()
             active = await UserOperate.get_active_users_count()
             regcodes = await RegCodeOperate.get_active_regcodes_count()
             server_status = await EmbyService.get_server_status()
-            
-            logger.info("=" * 50)
-            logger.info("📈 Twilight 每日统计")
-            logger.info("=" * 50)
-            logger.info(f"👥 注册用户: {registered} / {RegisterConfig.USER_LIMIT}")
-            logger.info(f"✅ 活跃用户: {active}")
-            logger.info(f"🎫 可用注册码: {regcodes}")
-            logger.info(f"📺 Emby 状态: {'在线' if server_status.get('online') else '离线'}")
+
+            ctx.summary.update({
+                'registered': registered,
+                'user_limit': RegisterConfig.USER_LIMIT,
+                'active': active,
+                'available_regcodes': regcodes,
+                'emby_online': bool(server_status.get('online')),
+                'active_sessions': server_status.get('active_sessions', 0)
+                    if server_status.get('online') else 0,
+            })
+
+            ctx.log("=" * 30)
+            ctx.log(f"👥 注册用户: {registered} / {RegisterConfig.USER_LIMIT}")
+            ctx.log(f"✅ 活跃用户: {active}")
+            ctx.log(f"🎫 可用注册码: {regcodes}")
+            ctx.log(f"📺 Emby 状态: {'在线' if server_status.get('online') else '离线'}")
             if server_status.get('online'):
-                logger.info(f"   活跃会话: {server_status.get('active_sessions', 0)}")
-            logger.info("=" * 50)
+                ctx.log(f"   活跃会话: {server_status.get('active_sessions', 0)}")
+            ctx.log("=" * 30)
         except Exception as e:
-            logger.error(f"❌ 生成统计时发生错误: {e}")
+            ctx.log(f"❌ 生成统计时发生错误: {e}")
+            raise
 
     @staticmethod
-    async def send_expiry_reminders():
+    async def send_expiry_reminders(ctx: RunContext):
         """发送到期提醒"""
         from src.services.admin_service import ReminderService
-        logger.info("📧 发送到期提醒...")
+        ctx.log("📧 发送到期提醒...")
         try:
             result = await ReminderService.send_expiry_reminders()
-            logger.info(f"✅ 到期提醒发送完成: {result['sent']} 条")
+            sent = int(result.get('sent', 0)) if isinstance(result, dict) else 0
+            ctx.summary['sent'] = sent
+            ctx.log(f"✅ 到期提醒发送完成: {sent} 条")
         except Exception as e:
-            logger.error(f"❌ 发送到期提醒出错: {e}")
+            ctx.log(f"❌ 发送到期提醒出错: {e}")
+            raise
 
     @staticmethod
-    async def emby_sync():
+    async def emby_sync(ctx: RunContext):
         """定期同步 Emby 用户数据"""
-        logger.info("🔄 开始 Emby 用户数据同步...")
+        ctx.log("🔄 开始 Emby 用户数据同步...")
         try:
             success, failed, errors = await EmbyService.sync_all_users()
-            logger.info(f"✅ Emby 同步完成: 成功 {success}, 失败 {failed}")
+            ctx.summary['success'] = int(success or 0)
+            ctx.summary['failed'] = int(failed or 0)
+            ctx.log(f"✅ Emby 同步完成: 成功 {success}, 失败 {failed}")
             if errors:
                 for e in errors[:10]:
-                    logger.warning(f"  ⚠️ {e}")
+                    ctx.log(f"  ⚠️ {e}")
         except Exception as e:
-            logger.error(f"❌ Emby 同步出错: {e}")
+            ctx.log(f"❌ Emby 同步出错: {e}")
+            raise
 
     @staticmethod
-    async def enforce_group_membership():
+    async def enforce_group_membership(ctx: RunContext):
         """定时巡检：绑定了 TG 但已退出必需群组的用户 → 禁用本地账号 + 禁用 Emby。
 
         仅在 `TelegramConfig.REQUIRE_GROUP_MEMBERSHIP` 开启且配置了 `GROUP_ID` 时执行。
@@ -333,25 +453,29 @@ class SchedulerService:
         """
         from src.services.telegram_membership import TelegramMembershipService
         if not TelegramMembershipService.enforcement_enabled():
+            ctx.summary['enabled'] = False
+            ctx.log("ℹ️ 群组成员巡检未启用")
             return
 
-        logger.info("🛂 开始群组成员资格巡检...")
+        ctx.summary['enabled'] = True
+        ctx.log("🛂 开始群组成员资格巡检...")
         try:
             users = await UserOperate.get_active_telegram_bound_users()
+            ctx.summary['scanned'] = len(users)
+            ctx.summary['in_group'] = 0
+            ctx.summary['disabled'] = 0
+            ctx.summary['failed'] = 0
             if not users:
-                logger.info("✅ 没有需要检查的用户")
+                ctx.log("✅ 没有需要检查的用户")
                 return
 
-            disabled = 0
-            skipped = 0
-            failed = 0
             for u in users:
                 try:
                     ok, missing = await TelegramMembershipService.check_user_in_groups(
                         u.TELEGRAM_ID, strict=False
                     )
                     if ok:
-                        skipped += 1
+                        ctx.summary['in_group'] += 1
                         continue
 
                     # 拿到了「明确不在群」的判定 → 禁用
@@ -359,61 +483,66 @@ class SchedulerService:
                         u, reason="未加入必需 Telegram 群组"
                     )
                     if success:
-                        disabled += 1
-                        logger.info(
+                        ctx.summary['disabled'] += 1
+                        ctx.log(
                             f"  ⏹️ 已禁用 {u.USERNAME} (UID: {u.UID}, "
                             f"TG: {u.TELEGRAM_ID}) — 缺失群组: "
                             f"{', '.join(m.id for m in missing) or '未知'}"
                         )
                     else:
-                        failed += 1
-                        logger.warning(
-                            f"  ⚠️ 禁用 {u.USERNAME} 失败: {msg}"
-                        )
+                        ctx.summary['failed'] += 1
+                        ctx.log(f"  ⚠️ 禁用 {u.USERNAME} 失败: {msg}")
                 except Exception as exc:  # pragma: no cover
-                    failed += 1
-                    logger.error(
-                        f"  ❌ 巡检 {u.USERNAME} (UID: {u.UID}) 出错: {exc}",
-                        exc_info=True,
-                    )
+                    ctx.summary['failed'] += 1
+                    ctx.log(f"  ❌ 巡检 {u.USERNAME} (UID: {u.UID}) 出错: {exc}")
 
-            logger.info(
-                f"✅ 群组成员资格巡检完成: 仍在群 {skipped} 个, 已禁用 {disabled} 个, "
-                f"失败 {failed} 个"
+            ctx.log(
+                f"✅ 群组成员资格巡检完成: 仍在群 {ctx.summary['in_group']} 个, "
+                f"已禁用 {ctx.summary['disabled']} 个, 失败 {ctx.summary['failed']} 个"
             )
         except Exception as exc:
-            logger.error(f"❌ 群组成员资格巡检异常: {exc}", exc_info=True)
+            ctx.log(f"❌ 群组成员资格巡检异常: {exc}")
+            raise
 
     @staticmethod
-    async def cleanup_no_emby_users():
+    async def cleanup_no_emby_users(ctx: RunContext):
         """清理注册后长期未创建 Emby 账户的用户"""
         if not RegisterConfig.AUTO_CLEANUP_NO_EMBY:
+            ctx.summary['enabled'] = False
+            ctx.log("ℹ️ AUTO_CLEANUP_NO_EMBY 未启用，跳过")
             return
         days = RegisterConfig.AUTO_CLEANUP_NO_EMBY_DAYS
-        logger.info(f"🧹 开始清理注册超过 {days} 天无 Emby 账户的用户...")
+        ctx.summary['enabled'] = True
+        ctx.summary['days_threshold'] = days
+        ctx.log(f"🧹 开始清理注册超过 {days} 天无 Emby 账户的用户...")
         try:
             users = await UserOperate.get_no_emby_users(days)
+            ctx.summary['scanned'] = len(users)
+            ctx.summary['deleted'] = 0
+            ctx.summary['failed'] = 0
             if not users:
-                logger.info("✅ 没有需要清理的无 Emby 账户用户")
+                ctx.log("✅ 没有需要清理的无 Emby 账户用户")
                 return
 
-            deleted_count = 0
-            failed_count = 0
             for user in users:
                 try:
                     success, msg = await UserService.delete_user(user, delete_emby=False)
                     if success:
-                        deleted_count += 1
-                        logger.info(f"  🗑️ 已删除: {user.USERNAME} (UID: {user.UID})")
+                        ctx.summary['deleted'] += 1
+                        ctx.log(f"  🗑️ 已删除: {user.USERNAME} (UID: {user.UID})")
                     else:
-                        failed_count += 1
-                        logger.warning(f"  ⚠️ 删除失败: {user.USERNAME} - {msg}")
+                        ctx.summary['failed'] += 1
+                        ctx.log(f"  ⚠️ 删除失败: {user.USERNAME} - {msg}")
                 except Exception as e:
-                    failed_count += 1
-                    logger.error(f"  ❌ 删除失败: {user.USERNAME} - {e}")
-            logger.info(f"✅ 无 Emby 账户用户清理完成: 删除 {deleted_count} 个, 失败 {failed_count} 个")
+                    ctx.summary['failed'] += 1
+                    ctx.log(f"  ❌ 删除失败: {user.USERNAME} - {e}")
+            ctx.log(
+                f"✅ 无 Emby 账户用户清理完成: 删除 {ctx.summary['deleted']} 个, "
+                f"失败 {ctx.summary['failed']} 个"
+            )
         except Exception as e:
-            logger.error(f"❌ 清理无 Emby 账户用户时发生错误: {e}")
+            ctx.log(f"❌ 清理无 Emby 账户用户时发生错误: {e}")
+            raise
 
     @classmethod
     async def start(cls):
@@ -421,6 +550,14 @@ class SchedulerService:
         if not SchedulerConfig.ENABLED:
             logger.info("ℹ️ 调度器已禁用")
             return
+
+        # 进程上一次崩溃前的「running」状态行先回写为 failed，避免前端永远转圈
+        try:
+            reconciled = await SchedulerRunOperate.reconcile_orphans()
+            if reconciled:
+                logger.info(f"已将 {reconciled} 条残留运行中记录标记为失败")
+        except Exception as exc:  # pragma: no cover
+            logger.warning(f"reconcile orphans 失败: {exc}")
 
         scheduler = cls.get_scheduler()
         try:
@@ -483,8 +620,8 @@ class SchedulerService:
             )
         logger.info("=" * 50)
         
-        # 立即运行一次统计
-        await cls.daily_stats()
+        # 立即运行一次统计（走 tracking 包装，复用同一份 ctx/落库逻辑）
+        await cls._run_with_tracking('daily_stats', cls.daily_stats, trigger='startup')
 
     @classmethod
     async def stop(cls):

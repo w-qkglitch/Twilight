@@ -713,7 +713,7 @@ export default function MediaPage() {
         setMediaDetail(null);
         setInventoryCheck(null);
       }}>
-        <DialogContent className="max-w-3xl border-0 p-0 overflow-hidden glass-acrylic rounded-[3rem] shadow-2xl">
+        <DialogContent className="max-w-3xl max-h-[90dvh] overflow-y-auto border-0 p-0 glass-acrylic rounded-[3rem] shadow-2xl">
           {isLoadingDetail ? (
             <div className="flex h-[400px] items-center justify-center">
               <div className="relative">
@@ -816,8 +816,8 @@ export default function MediaPage() {
                           className={cn(
                             "px-4 py-2 rounded-xl text-xs font-black transition-all border shadow-sm",
                             selectedSeason === undefined 
-                              ? "bg-primary text-primary-foreground border-primary shadow-primary/20" 
-                              : "bg-white border-white/40 text-muted-foreground hover:bg-slate-950/90 dark:hover:bg-slate-900/90"
+                              ? "bg-primary text-primary-foreground border-primary shadow-primary/20"
+                              : "bg-card border-border text-muted-foreground hover:bg-accent"
                           )}
                         >
                           全部季度
@@ -834,7 +834,7 @@ export default function MediaPage() {
                                 selectedSeason === s 
                                   ? "bg-primary text-primary-foreground border-primary shadow-primary/20" 
                                   : isAvailable
-                                    ? "bg-emerald-50 border-emerald-100 text-emerald-600 opacity-60 cursor-not-allowed"
+                                    ? "bg-emerald-50 border-emerald-100 text-emerald-600 opacity-60 cursor-not-allowed dark:bg-emerald-500/15 dark:border-emerald-500/30 dark:text-emerald-300"
                                     : "bg-background border-border text-muted-foreground hover:bg-accent"
                               )}
                             >

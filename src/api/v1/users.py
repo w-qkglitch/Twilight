@@ -100,9 +100,9 @@ async def register():
     if not telegram_id and not password:
         return api_response(False, "请设置密码", code=400)
     
-    # 密码长度验证
-    if password and len(password) < 6:
-        return api_response(False, "密码长度至少 6 位", code=400)
+    # 密码长度验证（与 UserService 校验一致）
+    if password and len(password) < 8:
+        return api_response(False, "密码长度至少 8 位", code=400)
     
     # 用户名验证
     from src.core.utils import is_valid_username
@@ -578,12 +578,12 @@ async def unbind_emby_account():
 async def check_regcode():
     """
     检查注册码/续期码类型
-    
+
     Request:
         {
             "reg_code": "code-xxx"
         }
-    
+
     Response:
         {
             "success": true,
@@ -596,10 +596,21 @@ async def check_regcode():
         }
     """
     from src.db.regcode import RegCodeOperate
-    
+    from src.core.utils import rate_limit_check
+
+    # 公开端点，按 IP 限流防止枚举注册码（10 次 / 分钟）
+    client_ip = request.remote_addr or 'unknown'
+    allowed, retry_after = rate_limit_check(
+        'regcode_check', client_ip, max_requests=10, window_seconds=60,
+    )
+    if not allowed:
+        return api_response(
+            False, f"操作过于频繁，请在 {retry_after} 秒后重试", code=429,
+        )
+
     data = request.get_json() or {}
     reg_code = data.get('reg_code', '').strip()
-    
+
     if not reg_code:
         return api_response(False, "缺少注册码", code=400)
     
@@ -1024,6 +1035,18 @@ async def generate_tg_register_bind_code():
     生成注册时使用的 Telegram 绑定码（无需登录）
     """
     from src.config import Config, TelegramConfig
+    from src.core.utils import rate_limit_check
+
+    # 公开端点：按 IP 限制单位时间内生成的绑定码数量（5 次 / 10 分钟），
+    # 防止单 IP 把全局 _MAX_BIND_CODES 配额填满造成 DoS。
+    client_ip = request.remote_addr or 'unknown'
+    allowed, retry_after = rate_limit_check(
+        'tg_register_bind_code', client_ip, max_requests=5, window_seconds=600,
+    )
+    if not allowed:
+        return api_response(
+            False, f"请求过于频繁，请在 {retry_after} 秒后重试", code=429,
+        )
 
     if not Config.TELEGRAM_MODE or not TelegramConfig.BOT_TOKEN:
         return api_response(False, "Telegram Bot 未启用", code=400)
@@ -1275,11 +1298,45 @@ _CSS_BG_FUNC_RE = re.compile(
 )
 
 
+def _is_disallowed_bg_host(host: str) -> bool:
+    """拦截会让访客浏览器去探测内网/元数据服务的危险主机名。
+
+    背景图片 URL 会被所有访问页面的用户的浏览器请求，攻击者可以利用这一点
+    把内网地址写进背景图配置，让被访问者代为发起 SSRF 探测。这里在「写入时」
+    就拒绝掉所有解析为私网 / 回环 / 链路本地 / 多播 / 云元数据 (169.254.169.254)
+    的 host，以及裸 IP 之外的常见 localhost 别名。
+    """
+    import ipaddress
+    if not host:
+        return True
+    h = host.strip().strip('[').strip(']').lower()
+    # localhost 别名 / metadata.google.internal 等
+    bad_names = {
+        'localhost', 'localhost.localdomain', 'ip6-localhost', 'ip6-loopback',
+        'metadata.google.internal', 'metadata.goog',
+    }
+    if h in bad_names or h.endswith('.localhost'):
+        return True
+    # 尝试解析为 IP；解析不出来就当外网域名放行
+    try:
+        ip = ipaddress.ip_address(h)
+    except ValueError:
+        return False
+    return bool(
+        ip.is_private
+        or ip.is_loopback
+        or ip.is_link_local
+        or ip.is_multicast
+        or ip.is_reserved
+        or ip.is_unspecified
+    )
+
+
 def _is_valid_background_url(value: str) -> bool:
     """允许:
     - 空字符串
     - 站内相对路径 ("/uploads/...")
-    - 裸 http(s):// URL
+    - 裸 http(s):// URL（host 不能解析到私网/回环/元数据地址）
     - CSS url("...") 包装（内部 URL 同样需通过校验）
     - linear-gradient / radial-gradient 等 CSS 背景函数
     """
@@ -1305,7 +1362,9 @@ def _is_valid_background_url(value: str) -> bool:
             parsed = urlparse(inner)
         except Exception:
             return False
-        return parsed.scheme in ('http', 'https') and bool(parsed.netloc)
+        if parsed.scheme not in ('http', 'https') or not parsed.netloc:
+            return False
+        return not _is_disallowed_bg_host(parsed.hostname or '')
 
     # gradient / image-set 等 CSS 函数：直接放行（仅做长度限制）
     if _CSS_BG_FUNC_RE.match(stripped):
@@ -1316,7 +1375,9 @@ def _is_valid_background_url(value: str) -> bool:
         parsed = urlparse(stripped)
     except Exception:
         return False
-    return parsed.scheme in ('http', 'https') and bool(parsed.netloc)
+    if parsed.scheme not in ('http', 'https') or not parsed.netloc:
+        return False
+    return not _is_disallowed_bg_host(parsed.hostname or '')
 
 @users_bp.route('/<int:uid>/background', methods=['GET'])
 @require_auth
@@ -1523,21 +1584,31 @@ async def upload_background_image():
     import uuid
     from pathlib import Path
     from flask import current_app
-    
+    from src.core.utils import rate_limit_check
+
     # 检查认证
     if not hasattr(g, 'current_user') or g.current_user is None:
         return api_response(False, "需要认证", code=401)
-    
+
     user = g.current_user
-    
+
+    # 限流：每个用户 10 次 / 分钟，防止刷爆磁盘
+    allowed, retry_after = rate_limit_check(
+        'upload_background', f'uid:{user.UID}', max_requests=10, window_seconds=60,
+    )
+    if not allowed:
+        return api_response(
+            False, f"上传过于频繁，请在 {retry_after} 秒后重试", code=429,
+        )
+
     # 检查文件
     if 'file' not in request.files:
         return api_response(False, "未找到文件", code=400)
-    
+
     file = request.files['file']
     if file.filename == '':
         return api_response(False, "文件名为空", code=400)
-    
+
     # 检查背景类型
     bg_type = request.form.get('type', 'light').lower()
     if bg_type not in ['light', 'dark']:
@@ -1625,13 +1696,23 @@ async def upload_avatar():
     import uuid
     from pathlib import Path
     from flask import current_app
-    
+    from src.core.utils import rate_limit_check
+
     user = g.current_user
-    
+
+    # 限流：每个用户 10 次 / 分钟
+    allowed, retry_after = rate_limit_check(
+        'upload_avatar', f'uid:{user.UID}', max_requests=10, window_seconds=60,
+    )
+    if not allowed:
+        return api_response(
+            False, f"上传过于频繁，请在 {retry_after} 秒后重试", code=429,
+        )
+
     # 检查文件
     if 'file' not in request.files:
         return api_response(False, "缺少文件", code=400)
-    
+
     file = request.files['file']
     if file.filename == '':
         return api_response(False, "未选择文件", code=400)

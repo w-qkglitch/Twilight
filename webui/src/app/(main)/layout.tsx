@@ -201,16 +201,14 @@ export default function MainLayout({
     }
   }, [isAuthenticated, isLoading, isAdmin, pathname, router]);
 
-  if (isLoading) {
+  // 加载中 / 未登录都保持 loader，等到 router.push 真的导航走再卸载，
+  // 避免出现"白屏一帧 → 跳转"的肉眼可见闪烁。
+  if (isLoading || !isAuthenticated) {
     return (
       <div className="flex h-screen items-center justify-center">
         <Loader2 className="h-8 w-8 animate-spin text-primary" />
       </div>
     );
-  }
-
-  if (!isAuthenticated) {
-    return null;
   }
 
   return (

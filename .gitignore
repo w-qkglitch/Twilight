@@ -71,6 +71,8 @@ logs/
 api_error.log
 
 # Database
+# 前导斜杠很重要：不加会误伤源码目录 `src/db/`。新增 `src/db/*.py` 后请
+# 用 `git check-ignore -v src/db/<file>.py` 二次确认未被忽略。
 *.db
 *.sqlite
 *.sqlite3
@@ -144,14 +146,14 @@ dmypy.json
 *.rej
 *.patch
 *.bak
+
+# ==================== Local / Experimental ====================
+# 这些文件如果存在仅供本地实验，不应进入版本控制。
 migrate.py
-start_all.bat
 test_api.py
 test_external.py
-start_all.bat
+test_import.py
 OPTIMIZATION_SUMMARY.md
 /tests
 config.toml
-*.backup
-test_import.py
 /.claude

@@ -594,6 +594,19 @@ class ApiClient {
     );
   }
 
+  async getSchedulerJobLastRun(jobId: string) {
+    return this.request<{ job_id: string; last_run: SchedulerJobRun | null }>(
+      `/admin/scheduler/jobs/${encodeURIComponent(jobId)}/last-run`,
+    );
+  }
+
+  async getSchedulerJobHistory(jobId: string, limit = 20) {
+    const q = new URLSearchParams({ limit: String(limit) });
+    return this.request<{ job_id: string; history: SchedulerJobRun[]; total: number }>(
+      `/admin/scheduler/jobs/${encodeURIComponent(jobId)}/history?${q}`,
+    );
+  }
+
   async syncAllEmbyUsers() {
     return this.request<{ success: number; failed: number; errors: string[] }>("/admin/emby/sync", {
       method: "POST",
@@ -1337,10 +1350,15 @@ export interface ConfigSchema {
 
 
 export interface SchedulerJobRun {
+  id?: number;
+  job_id?: string;
+  trigger?: string;
   status: "running" | "success" | "failed";
   started_at: number;
   finished_at: number | null;
   error: string | null;
+  summary?: Record<string, unknown> | null;
+  logs?: string[];
 }
 
 export interface SchedulerJobItem {

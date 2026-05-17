@@ -199,19 +199,19 @@ export default function AdminRequestsPage() {
 
   return (
     <div className="space-y-6">
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-3xl font-bold">求片审核</h1>
-          <p className="text-muted-foreground">处理用户的媒体请求</p>
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+        <div className="min-w-0">
+          <h1 className="text-2xl font-bold sm:text-3xl">求片审核</h1>
+          <p className="text-sm text-muted-foreground">处理用户的媒体请求</p>
         </div>
-        <Badge variant="outline" className="text-lg px-4 py-2">
+        <Badge variant="outline" className="self-start px-3 py-1.5 text-sm sm:self-auto sm:px-4 sm:py-2 sm:text-lg">
           共 {total} 条请求
         </Badge>
       </div>
 
       {/* Status Filter */}
       <Tabs value={status} onValueChange={(v) => { setStatus(v); setPage(1); }}>
-        <TabsList>
+        <TabsList className="flex w-full overflow-x-auto sm:inline-flex sm:w-auto">
           <TabsTrigger value="pending">待处理</TabsTrigger>
           <TabsTrigger value="accepted">已接受</TabsTrigger>
           <TabsTrigger value="rejected">已拒绝</TabsTrigger>
@@ -233,8 +233,11 @@ export default function AdminRequestsPage() {
           ) : (
             <div className="divide-y">
               {requests.map((request) => (
-                <div key={request.id} className="flex items-center justify-between p-4 hover:bg-muted/30">
-                  <div className="flex items-start gap-4 flex-1 min-w-0">
+                <div
+                  key={request.id}
+                  className="flex flex-col gap-3 p-4 hover:bg-muted/30 sm:flex-row sm:items-center sm:justify-between"
+                >
+                  <div className="flex min-w-0 flex-1 items-start gap-4">
                     <div className="relative flex h-20 w-14 shrink-0 items-center justify-center rounded-lg bg-primary/5 overflow-hidden border border-primary/10">
                       {request.media_info?.poster || request.media_info?.poster_url ? (
                         <Image
@@ -249,9 +252,9 @@ export default function AdminRequestsPage() {
                         <Film className="h-6 w-6 text-primary/50" />
                       )}
                     </div>
-                    <div>
-                      <div className="flex items-center gap-2">
-                        <p className="font-medium">{request.media_info?.title || request.title}</p>
+                    <div className="min-w-0 flex-1">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <p className="break-words font-medium">{request.media_info?.title || request.title}</p>
                         {request.media_info?.season && (
                           <Badge variant="outline" className="text-xs">
                             第 {request.media_info.season} 季
@@ -268,7 +271,7 @@ export default function AdminRequestsPage() {
                           </Badge>
                         )}
                       </div>
-                      <div className="mt-1 flex items-center gap-2 text-xs text-muted-foreground">
+                      <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted-foreground">
                         <div className="flex items-center gap-1">
                           {request.source.toLowerCase() === "tmdb" ? (
                             <Image
@@ -297,61 +300,63 @@ export default function AdminRequestsPage() {
                             </Badge>
                           )}
                         </div>
-                        <span>•</span>
+                        <span className="hidden sm:inline">•</span>
                         <span className="flex items-center gap-0.5"><Hash className="h-3 w-3" />{request.id}</span>
-                        <span>•</span>
-                        <span className="flex items-center gap-0.5" title="External Update Key">
-                          <Fingerprint className="h-3 w-3" />
-                          <code className="bg-muted text-foreground px-1 rounded">{request.require_key}</code>
+                        <span className="hidden sm:inline">•</span>
+                        <span className="flex min-w-0 items-center gap-0.5" title="External Update Key">
+                          <Fingerprint className="h-3 w-3 shrink-0" />
+                          <code className="max-w-[10rem] truncate rounded bg-muted px-1 text-foreground sm:max-w-[16rem]">
+                            {request.require_key}
+                          </code>
                         </span>
-                        <span>•</span>
+                        <span className="hidden sm:inline">•</span>
                         <span>{request.media_info?.media_type === "movie" ? "电影" : "剧集"}</span>
-                        <span>•</span>
+                        <span className="hidden sm:inline">•</span>
                         <span>{formatDate(request.timestamp)}</span>
                         {request.user && (
                           <>
-                            <span>•</span>
-                            <span>用户: {request.user.username || request.user.telegram_id}</span>
+                            <span className="hidden sm:inline">•</span>
+                            <span className="truncate">用户: {request.user.username || request.user.telegram_id}</span>
                           </>
                         )}
                       </div>
                       {request.media_info?.overview && (
-                        <p className="mt-2 text-xs text-muted-foreground line-clamp-2 max-w-2xl">
+                        <p className="mt-2 line-clamp-2 max-w-full break-words text-xs text-muted-foreground sm:max-w-2xl">
                           {request.media_info.overview}
                         </p>
                       )}
                       {request.media_info?.note && (
-                        <p className="mt-1 text-xs text-muted-foreground">
+                        <p className="mt-1 break-words text-xs text-muted-foreground">
                           <MessageSquare className="mr-1 inline h-3 w-3" />
                           {request.media_info.note}
                         </p>
                       )}
                       {request.admin_note && (
-                        <p className="mt-1 text-xs text-primary">
+                        <p className="mt-1 break-words text-xs text-primary">
                           管理员备注: {request.admin_note}
                         </p>
                       )}
                     </div>
                   </div>
-                    <div className="flex items-center gap-3">
-                      {getStatusBadge(request.status)}
-                      <Button
-                        size="sm"
-                        variant="outline"
-                        onClick={() => openActionDialog(request)}
-                      >
-                        处理
-                      </Button>
-                      <Button
-                        size="icon"
-                        variant="ghost"
-                        className="h-8 w-8 text-muted-foreground hover:text-destructive dark:hover:bg-destructive/15"
-                        onClick={() => handleDelete(request.id)}
-                        title="删除请求"
-                      >
-                        <Trash2 className="h-4 w-4" />
-                      </Button>
-                    </div>
+                  <div className="flex shrink-0 flex-wrap items-center gap-2 sm:gap-3 sm:self-center">
+                    {getStatusBadge(request.status)}
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      onClick={() => openActionDialog(request)}
+                    >
+                      处理
+                    </Button>
+                    <Button
+                      size="icon"
+                      variant="ghost"
+                      className="h-8 w-8 text-muted-foreground hover:text-destructive dark:hover:bg-destructive/15"
+                      onClick={() => handleDelete(request.id)}
+                      title="删除请求"
+                    >
+                      <Trash2 className="h-4 w-4" />
+                    </Button>
+                  </div>
                 </div>
               ))}
             </div>

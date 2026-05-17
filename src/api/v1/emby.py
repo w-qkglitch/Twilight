@@ -15,6 +15,7 @@ emby_bp = Blueprint('emby', __name__, url_prefix='/emby')
 # ==================== 服务器信息 ====================
 
 @emby_bp.route('/status', methods=['GET'])
+@require_auth
 async def get_server_status():
     """
     获取 Emby 服务器状态
@@ -39,34 +40,21 @@ async def get_server_status():
 
 @emby_bp.route('/urls', methods=['GET'])
 async def get_server_urls():
+    """已弃用：请改用 /api/v1/system/emby-urls（按用户角色/绑定状态下发线路）。
+
+    保留路径但拒绝服务，避免泄露线路给未鉴权访客。
     """
-    获取 Emby 服务器地址列表（用于客户端连接）
-    
-    Response:
-        {
-            "success": true,
-            "data": {
-                "urls": [
-                    {"name": "Direct", "url": "http://..."},
-                    {"name": "Proxy", "url": "http://..."}
-                ]
-            }
-        }
-    """
-    urls = []
-    for url_str in EmbyConfig.EMBY_URL_LIST:
-        if ' : ' in url_str:
-            name, url = url_str.split(' : ', 1)
-            urls.append({'name': name.strip(), 'url': url.strip()})
-        else:
-            urls.append({'name': 'Server', 'url': url_str.strip()})
-    
-    return api_response(True, "获取成功", {'urls': urls})
+    return api_response(
+        False,
+        "该端点已弃用，请改用 /api/v1/system/emby-urls",
+        code=410,
+    )
 
 
 # ==================== 媒体库 ====================
 
 @emby_bp.route('/libraries', methods=['GET'])
+@require_auth
 async def get_libraries():
     """
     获取媒体库列表
@@ -90,6 +78,7 @@ async def get_libraries():
 # ==================== 媒体搜索 ====================
 
 @emby_bp.route('/search', methods=['GET'])
+@require_auth
 async def search_media():
     """
     搜索媒体
@@ -125,6 +114,7 @@ async def search_media():
 
 
 @emby_bp.route('/latest', methods=['GET'])
+@require_auth
 async def get_latest_media():
     """
     获取最新媒体
@@ -143,9 +133,10 @@ async def get_latest_media():
     return api_response(True, "获取成功", results)
 
 
-# ==================== 会话信息（公开） ====================
+# ==================== 会话信息 ====================
 
 @emby_bp.route('/sessions/count', methods=['GET'])
+@require_auth
 async def get_sessions_count():
     """获取当前活动会话数量"""
     emby = get_emby_client()

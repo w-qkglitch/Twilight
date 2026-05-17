@@ -373,7 +373,7 @@ export default function DashboardPage() {
       </div>
 
       <motion.div variants={item}>
-        <AnnouncementBoard />
+        <AnnouncementBoard splitPinned />
       </motion.div>
 
       {/* 顶部三块: 到期 / 状态 / Emby 绑定 */}

@@ -28,16 +28,23 @@ ALL_PERMISSIONS = [
 ]
 
 
+_LEGACY_DEFAULT_PERMISSIONS: List[str] = ['account:read']
+
+
 def _get_user_permissions(user: UserModel) -> List[str]:
-    """获取用户 API Key 的权限列表"""
+    """获取旧版单密钥（`UserModel.APIKEY`）路径的权限列表。
+
+    历史上未显式配置过权限的旧 Key 会被视作拥有全部权限，存在过度授权风险。
+    现在收紧为只读：`account:read`。需要写入/控制 Emby 的客户端请在 Web 端
+    重新生成多密钥（`/users/me/apikeys`）并明确勾选所需 `permissions`。
+    """
     if not user.APIKEY_PERMISSIONS:
-        # 默认权限：向后兼容，旧 Key 拥有全部权限
-        return list(ALL_PERMISSIONS)
+        return list(_LEGACY_DEFAULT_PERMISSIONS)
     try:
         perms = json.loads(user.APIKEY_PERMISSIONS)
         return [p for p in perms if p in ALL_PERMISSIONS]
     except (json.JSONDecodeError, TypeError):
-        return list(ALL_PERMISSIONS)
+        return list(_LEGACY_DEFAULT_PERMISSIONS)
 
 
 def require_apikey(f: Callable) -> Callable:

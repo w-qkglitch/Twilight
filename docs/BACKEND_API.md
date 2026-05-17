@@ -84,6 +84,8 @@ Authorization: ApiKey <api_key>
 | 401 | 未认证 / Token 或 API Key 无效 |
 | 403 | 权限不足 / 账号或 API Key 被禁用 |
 | 404 | 资源不存在 |
+| 410 | 端点已弃用（如 `/emby/urls`，请改用文档指明的替代接口） |
+| 429 | 触发限流（如登录失败次数超阈值） |
 | 500 | 服务器内部错误 |
 
 ## 4. 模块总览
@@ -94,7 +96,7 @@ Authorization: ApiKey <api_key>
 | Users | `/users` | 注册、个人信息、Emby 绑定、续期、设备、Telegram |
 | Media | `/media` | TMDB/Bangumi 搜索、求片、库存管理 |
 | Emby | `/emby` | Emby 账号状态、库、搜索、会话 |
-| Admin | `/admin` | 管理用户、Emby 同步、注册码、广播 |
+| Admin | `/admin` | 管理用户、Emby 同步、注册码、广播、定时任务 |
 | Stats | `/stats` | 播放统计 |
 | System | `/system` | 健康、系统信息、配置、路由列表 |
 | API Key | `/apikey` | 外部系统专用 API Key 接口 |
@@ -911,19 +913,12 @@ curl -X GET "http://localhost:5000/api/v1/emby/status" \
   -H "Authorization: Bearer <token>"
 ```
 
-### 获取 Emby 服务 URLs
+### 获取 Emby 服务 URLs（已弃用）
 
 `GET /emby/urls`
 
-- 说明：获取 Emby 服务 URLs
-- 认证：登录 Token
-
-- 示例 cURL：
-
-```bash
-curl -X GET "http://localhost:5000/api/v1/emby/urls" \
-  -H "Authorization: Bearer <token>"
-```
+- 状态：**已弃用，固定返回 `410 Gone`**。该端点早期为未鉴权返回全量线路，存在泄露风险。
+- 替代：改用 `GET /system/emby-urls`，按用户角色和 Emby 绑定状态下发线路（未绑定 Emby 的普通用户返回空列表）。
 
 ### 获取 Emby 媒体库列表
 
@@ -1415,6 +1410,107 @@ curl -X POST "http://localhost:5000/api/v1/admin/users/cleanup-invalid" \
   -H "Authorization: Bearer <admin_token>"
 ```
 
+### 9.4 定时任务管理
+
+所有定时任务的执行历史会持久化到 `db/scheduler_run.db` 的 `scheduler_run` 表，
+每个 `job_id` 默认保留最近 50 条记录；超出后自动按 ID 升序裁剪。
+
+进程启动时会调用 `reconcile_orphans()`：把所有起始于 6 小时前仍处于 `running`
+状态的记录改判为 `failed`（避免崩溃后前端永远转圈）。
+
+`SchedulerJobRun` 字段：
+
+| 字段          | 说明                                                                  |
+| ------------- | --------------------------------------------------------------------- |
+| `id`          | 数据库主键                                                            |
+| `job_id`      | 任务标识（如 `check_expired`、`emby_sync`）                           |
+| `trigger`     | 触发来源：`scheduled` / `manual` / `startup`                          |
+| `status`      | `running` / `success` / `failed`                                      |
+| `started_at`  | 起始时间戳（秒）                                                      |
+| `finished_at` | 结束时间戳（秒），运行中为 `null`                                     |
+| `error`       | 失败时的异常摘要（最长 1000 字符）                                    |
+| `summary`     | 结构化指标，如 `{"scanned": 12, "disabled": 3, "failed": 0}`           |
+| `logs`        | 任务内部 `ctx.log()` 累积的日志行（list；列表接口不返回，详情接口返回） |
+
+#### 列出全部定时任务
+
+`GET /admin/scheduler/jobs`
+
+- 说明：列出内置定时任务定义、计划时间、下次执行时间和最近一次运行摘要（不含 logs 正文，体积小适合轮询）。
+- 认证：管理员 Token
+- 响应示例：
+
+```json
+{
+  "success": true,
+  "data": {
+    "jobs": [
+      {
+        "id": "check_expired",
+        "name": "过期用户检查",
+        "description": "...",
+        "enabled": true,
+        "schedule": "cron[hour='4', minute='0']",
+        "next_run_at": 1715990400,
+        "is_running": false,
+        "last_run": {
+          "status": "success",
+          "started_at": 1715904000,
+          "finished_at": 1715904005,
+          "trigger": "scheduled",
+          "error": null,
+          "summary": {"scanned": 12, "disabled": 3, "failed": 0}
+        }
+      }
+    ]
+  }
+}
+```
+
+- 示例 cURL：
+
+```bash
+curl -X GET "http://localhost:5000/api/v1/admin/scheduler/jobs" \
+  -H "Authorization: Bearer <admin_token>"
+```
+
+#### 手动触发一次任务
+
+`POST /admin/scheduler/jobs/<job_id>/run`
+
+- 说明：将指定任务排入后台执行；接口立即返回，前端通过轮询 `/admin/scheduler/jobs` 拿到结束状态。
+- 认证：管理员 Token
+- 响应：`data.last_run` 是触发时的快照（通常为 `running`）。
+
+```bash
+curl -X POST "http://localhost:5000/api/v1/admin/scheduler/jobs/check_expired/run" \
+  -H "Authorization: Bearer <admin_token>"
+```
+
+#### 获取最近一次完整运行（含日志）
+
+`GET /admin/scheduler/jobs/<job_id>/last-run`
+
+- 说明：返回包含 `logs` 正文的完整 `SchedulerJobRun`。前端"查看日志"弹窗使用。
+- 认证：管理员 Token
+
+```bash
+curl -X GET "http://localhost:5000/api/v1/admin/scheduler/jobs/emby_sync/last-run" \
+  -H "Authorization: Bearer <admin_token>"
+```
+
+#### 获取历史运行列表
+
+`GET /admin/scheduler/jobs/<job_id>/history?limit=20`
+
+- 说明：按时间倒序返回历史运行；`limit` 范围 1–100，默认 20。
+- 认证：管理员 Token
+
+```bash
+curl -X GET "http://localhost:5000/api/v1/admin/scheduler/jobs/emby_sync/history?limit=20" \
+  -H "Authorization: Bearer <admin_token>"
+```
+
 ## 10. Stats 模块
 
 ### 当前用户统计
@@ -1496,6 +1592,39 @@ curl -X GET "http://localhost:5000/api/v1/system/info"
 ```bash
 curl -X GET "http://localhost:5000/api/v1/system/config" \
   -H "Authorization: Bearer <admin_token>"
+```
+
+### 获取 Emby 服务线路（按角色下发）
+
+`GET /system/emby-urls`
+
+- 说明：替代已弃用的 `/emby/urls`。后端会根据当前用户的角色与 Emby 绑定状态过滤：
+  - **未绑定 Emby 的普通用户**：返回空 `lines`，响应体附带 `requires_emby_account: true`，前端据此隐藏整块线路 UI，避免在用户尚未持有 Emby 账号时先把服务器地址泄露给浏览器。
+  - **已绑定 Emby 的普通用户**：返回普通线路列表 `lines`。
+  - **白名单 / 管理员**：额外返回 `whitelist_lines` 专属线路。
+- 认证：登录 Token
+- 响应示例：
+
+```json
+{
+  "success": true,
+  "data": {
+    "lines": [
+      {"name": "Direct", "url": "https://emby.example.com"},
+      {"name": "CDN",    "url": "https://cdn.example.com"}
+    ],
+    "whitelist_lines": [
+      {"name": "Premium", "url": "https://vip.example.com"}
+    ]
+  }
+}
+```
+
+- 示例 cURL：
+
+```bash
+curl -X GET "http://localhost:5000/api/v1/system/emby-urls" \
+  -H "Authorization: Bearer <token>"
 ```
 
 ### 读取当前 config.toml
