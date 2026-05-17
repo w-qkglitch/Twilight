@@ -997,6 +997,57 @@ class UserService:
             return False, f"同步失败: {e}"
 
     @staticmethod
+    def get_cached_telegram_username(user: UserModel) -> Optional[str]:
+        """从 user.OTHER JSON 读取上次缓存的 Telegram username（不含 @）。"""
+        if not user or not user.OTHER:
+            return None
+        try:
+            data = json.loads(user.OTHER)
+        except (json.JSONDecodeError, TypeError):
+            return None
+        if not isinstance(data, dict):
+            return None
+        value = data.get('telegram_username')
+        if isinstance(value, str) and value.strip():
+            return value.strip().lstrip('@')
+        return None
+
+    @staticmethod
+    async def cache_telegram_username(
+        user: UserModel,
+        username: Optional[str],
+    ) -> bool:
+        """把 Telegram username 写进 user.OTHER 缓存。返回 True 表示有变更。
+
+        Bot 端在 `/bind /start /me` 等命令里有 `update.effective_user.username`，
+        每次都调一下这个方法，admin 列表端就能从 DB 直接读到 username，
+        避免在每次刷新列表时对几百个用户重复打 `bot.get_chat()`。
+        """
+        if user is None:
+            return False
+        normalized = (username or '').strip().lstrip('@') or None
+
+        try:
+            data = json.loads(user.OTHER) if user.OTHER else {}
+        except (json.JSONDecodeError, TypeError):
+            data = {}
+        if not isinstance(data, dict):
+            data = {}
+
+        current = data.get('telegram_username') or None
+        if (current or None) == (normalized or None):
+            return False
+
+        if normalized:
+            data['telegram_username'] = normalized
+        else:
+            data.pop('telegram_username', None)
+
+        user.OTHER = json.dumps(data) if data else ''
+        await UserOperate.update_user(user)
+        return True
+
+    @staticmethod
     async def get_user_info(user: UserModel) -> dict:
         """获取用户详细信息"""
         from src.core.utils import format_expire_time, mask_email

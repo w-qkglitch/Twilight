@@ -84,6 +84,17 @@ def register(bot):
 
         user_id = update.effective_user.id if update.effective_user else 0
         user_name = update.effective_user.first_name if update.effective_user else "用户"
+        # 顺手刷新 Telegram username 缓存（仅在用户已绑定的情况下），admin 列表会用
+        try:
+            tg_username = getattr(update.effective_user, 'username', None) if update.effective_user else None
+            if user_id and tg_username:
+                bound_user = await UserOperate.get_user_by_telegram_id(user_id)
+                if bound_user:
+                    from src.services import UserService
+                    await UserService.cache_telegram_username(bound_user, tg_username)
+        except Exception as exc:  # pragma: no cover
+            logger.debug(f"刷新 Telegram username 缓存失败: {exc}")
+
         server_name = Config.SERVER_NAME or "Twilight"
         panel_on = is_panel_enabled()
         admin_mode = is_admin(user_id)
@@ -371,6 +382,18 @@ def register(bot):
 
         d = d or {}
         if ok:
+            # 顺手把 Telegram username 缓存进 user.OTHER，admin 列表后续可以
+            # 直接读，不必每次都打 bot.get_chat()（既慢也容易触发限流）。
+            try:
+                tg_username = getattr(update.effective_user, 'username', None)
+                if tg_username:
+                    bound_user = await UserOperate.get_user_by_telegram_id(telegram_id)
+                    if bound_user:
+                        from src.services import UserService
+                        await UserService.cache_telegram_username(bound_user, tg_username)
+            except Exception as exc:  # pragma: no cover
+                logger.warning(f"缓存 Telegram username 失败: {exc}")
+
             # 注册绑定码验证成功时仅返回 telegram_id，这里给出更友好提示
             if not d.get('username'):
                 await update.message.reply_text(

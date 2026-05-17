@@ -62,30 +62,47 @@ async def list_users():
         sort_by=sort_by,
     )
     
-    # 转换为字典
-    user_list = []
-    # 尝试获取 bot 实例用于获取 Telegram 用户名
-    bot_instance = None
+    # Telegram username 优先取 user.OTHER 里缓存的（用户每次 /start /bind 会刷新）。
+    # 缓存里没有，且 Bot 在线时，best-effort 拉一次 get_chat 并写回缓存，
+    # 但对单次列表请求最多只拉前 `_MAX_LIVE_TG_FETCH` 个用户，避免 Bot API 限流。
+    _MAX_LIVE_TG_FETCH = 10
+    live_fetch_used = 0
+
+    bot = None
     try:
         from src.bot.bot import get_bot_instance
         bot_instance = get_bot_instance()
+        if bot_instance and bot_instance.application and bot_instance.application.bot:
+            bot = bot_instance.application.bot
     except Exception:
-        pass
-    
+        bot = None
+
+    user_list = []
     for user in users:
-        # 尝试获取 Telegram 用户名
-        telegram_username = None
-        if user.TELEGRAM_ID and bot_instance and bot_instance.application:
+        telegram_username = UserService.get_cached_telegram_username(user)
+
+        # 没缓存 + Bot 在线 + 本次请求还有 live fetch 配额 → 试一次
+        if (
+            telegram_username is None
+            and user.TELEGRAM_ID
+            and bot is not None
+            and live_fetch_used < _MAX_LIVE_TG_FETCH
+        ):
             try:
-                tg_user = await bot_instance.application.bot.get_chat(user.TELEGRAM_ID)
-                telegram_username = tg_user.username or f"{tg_user.first_name or ''} {tg_user.last_name or ''}".strip() or None
+                tg_user = await bot.get_chat(user.TELEGRAM_ID)
+                resolved = tg_user.username or None
+                live_fetch_used += 1
+                if resolved:
+                    telegram_username = resolved
+                    # 写回缓存；下次列表请求直接读 DB
+                    await UserService.cache_telegram_username(user, resolved)
             except Exception:
-                pass  # 如果获取失败，忽略
-        
+                live_fetch_used += 1  # 失败也算一次，免得一直死磕同一个
+
         user_list.append({
             'uid': user.UID,
             'telegram_id': user.TELEGRAM_ID,
-            'telegram_username': telegram_username,  # 添加 Telegram 用户名
+            'telegram_username': telegram_username,
             'username': user.USERNAME,
             'email': user.EMAIL,
             'role': user.ROLE,
