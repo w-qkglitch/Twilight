@@ -411,7 +411,7 @@ export default function DashboardPage() {
           </div>
           <p className="mt-4 text-[10px] font-black uppercase tracking-widest text-muted-foreground">Emby 绑定</p>
           <h3 className="text-2xl sm:text-3xl font-black mt-1 truncate">
-            {user?.emby_id ? user.emby_username || user.username || "已绑定" : "未绑定"}
+            {!user?.emby_id ? "未绑定" : user?.active ? "正常" : "禁用"}
           </h3>
         </motion.div>
       </div>
@@ -504,7 +504,7 @@ export default function DashboardPage() {
             )}
             {user?.emby_id ? (
               <p className="text-xs text-muted-foreground truncate">
-                我的 Emby：{user.emby_username || user.username}
+                我的 Emby：{user.emby_username || "—"}
               </p>
             ) : (
               <p className="text-xs text-amber-500">尚未绑定 Emby 账号</p>

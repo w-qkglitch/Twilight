@@ -607,6 +607,20 @@ class ApiClient {
     );
   }
 
+  async setSchedulerJobSchedule(jobId: string, payload: SchedulerTriggerSpec) {
+    return this.request<{ job_id: string; trigger_spec: SchedulerTriggerSpec; is_custom: boolean }>(
+      `/admin/scheduler/jobs/${encodeURIComponent(jobId)}/schedule`,
+      { method: "PUT", body: JSON.stringify(payload) },
+    );
+  }
+
+  async resetSchedulerJobSchedule(jobId: string) {
+    return this.request<{ job_id: string; trigger_spec: SchedulerTriggerSpec; is_custom: boolean }>(
+      `/admin/scheduler/jobs/${encodeURIComponent(jobId)}/schedule`,
+      { method: "DELETE" },
+    );
+  }
+
   async syncAllEmbyUsers() {
     return this.request<{ success: number; failed: number; errors: string[] }>("/admin/emby/sync", {
       method: "POST",
@@ -1361,6 +1375,10 @@ export interface SchedulerJobRun {
   logs?: string[];
 }
 
+export type SchedulerTriggerSpec =
+  | { type: "cron_daily"; hour: number; minute: number }
+  | { type: "interval"; seconds: number };
+
 export interface SchedulerJobItem {
   id: string;
   name: string;
@@ -1370,6 +1388,9 @@ export interface SchedulerJobItem {
   next_run_at: number | null;
   last_run: SchedulerJobRun | null;
   is_running: boolean;
+  trigger_spec: SchedulerTriggerSpec;
+  default_trigger_spec: SchedulerTriggerSpec;
+  is_custom: boolean;
 }
 
 

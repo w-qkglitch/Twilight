@@ -1418,6 +1418,14 @@ curl -X POST "http://localhost:5000/api/v1/admin/users/cleanup-invalid" \
 进程启动时会调用 `reconcile_orphans()`：把所有起始于 6 小时前仍处于 `running`
 状态的记录改判为 `failed`（避免崩溃后前端永远转圈）。
 
+`GET /admin/scheduler/jobs` 返回的每个 job 额外包含触发器结构化描述：
+
+| 字段                   | 说明                                                            |
+| ---------------------- | --------------------------------------------------------------- |
+| `trigger_spec`         | 当前生效的触发规则，结构同上述 PUT 请求体                       |
+| `default_trigger_spec` | config.toml 算出的默认值（用于"恢复默认"按钮显示）              |
+| `is_custom`            | 是否已被管理员覆盖（true 时前端显示"已自定义"徽章）             |
+
 `SchedulerJobRun` 字段：
 
 | 字段          | 说明                                                                  |
@@ -1508,6 +1516,52 @@ curl -X GET "http://localhost:5000/api/v1/admin/scheduler/jobs/emby_sync/last-ru
 
 ```bash
 curl -X GET "http://localhost:5000/api/v1/admin/scheduler/jobs/emby_sync/history?limit=20" \
+  -H "Authorization: Bearer <admin_token>"
+```
+
+#### 修改触发器（覆盖 config.toml 默认值）
+
+`PUT /admin/scheduler/jobs/<job_id>/schedule`
+
+- 说明：把新的触发规则写入 `db/scheduler_schedule.db`，并实时 `reschedule_job`；
+  下次进程重启后仍生效。每个 `job_id` 至多一条覆盖。
+- 认证：管理员 Token
+- 请求体（二选一）：
+
+```json
+{ "type": "cron_daily", "hour": 3, "minute": 0 }
+```
+
+```json
+{ "type": "interval", "seconds": 3600 }
+```
+
+- 约束：
+  - `cron_daily`：`hour ∈ [0, 23]`，`minute ∈ [0, 59]`
+  - `interval`：`seconds ∈ [60, 604800]`（最短 1 分钟，最长 7 天）
+
+- 响应示例：
+
+```json
+{
+  "success": true,
+  "data": {
+    "job_id": "emby_sync",
+    "trigger_spec": { "type": "interval", "seconds": 1800 },
+    "is_custom": true
+  }
+}
+```
+
+#### 重置触发器（恢复 config.toml 默认值）
+
+`DELETE /admin/scheduler/jobs/<job_id>/schedule`
+
+- 说明：删除该 job 的覆盖记录，并按 `default_trigger_spec` 重新 `reschedule_job`。
+- 认证：管理员 Token
+
+```bash
+curl -X DELETE "http://localhost:5000/api/v1/admin/scheduler/jobs/emby_sync/schedule" \
   -H "Authorization: Bearer <admin_token>"
 ```
 

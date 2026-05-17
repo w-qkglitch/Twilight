@@ -4,16 +4,15 @@ import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { motion } from "framer-motion";
-import { Eye, EyeOff, ArrowRight, Loader2, ShieldPlus, UserPlus, Clock3, Bot } from "lucide-react";
+import { Eye, EyeOff, Loader2, ShieldPlus, UserPlus, Clock3, Bot } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Card, CardDescription, CardTitle } from "@/components/ui/card";
+import { Card, CardTitle } from "@/components/ui/card";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useToast } from "@/hooks/use-toast";
 import { api, type EmbyRegisterStatus, type RegisterAvailability, type RegisterData } from "@/lib/api";
 import { SITE_NAME } from "@/lib/site-config";
-import { useAuthStore } from "@/store/auth";
 import { useSystemStore } from "@/store/system";
 import { passwordStrengthLabel, validatePasswordStrength } from "@/lib/password";
 
@@ -29,10 +28,8 @@ const QUEUE_STATUS_TEXT: Record<NonNullable<EmbyRegisterStatus["status"]>, strin
 export default function RegisterPage() {
   const router = useRouter();
   const { toast } = useToast();
-  const { login } = useAuthStore();
   const { info: systemInfo, fetchInfo: fetchSystemInfo } = useSystemStore();
 
-  const [activeTab, setActiveTab] = useState<string>("register");
   const [registerTarget, setRegisterTarget] = useState<RegisterTarget>("system");
 
   const [formData, setFormData] = useState({
@@ -55,10 +52,6 @@ export default function RegisterPage() {
   const [queueTicket, setQueueTicket] = useState<{ requestId: string; statusToken: string } | null>(null);
   const [embyQueueStatus, setEmbyQueueStatus] = useState<EmbyRegisterStatus | null>(null);
   const [queuePolling, setQueuePolling] = useState(false);
-
-  const [loginUsername, setLoginUsername] = useState("");
-  const [loginPassword, setLoginPassword] = useState("");
-  const [loginLoading, setLoginLoading] = useState(false);
 
   useEffect(() => {
     void fetchSystemInfo();
@@ -186,11 +179,6 @@ export default function RegisterPage() {
 
       if (nextStatus.status === "success" && prevStatus !== "success") {
         const generatedPassword = nextStatus.data?.emby_password;
-        setLoginUsername(nextStatus.data?.username || formData.username);
-        if (generatedPassword) {
-          setLoginPassword(generatedPassword);
-        }
-
         toast({
           title: "Emby 账号注册成功",
           description: generatedPassword
@@ -356,47 +344,6 @@ export default function RegisterPage() {
     }
   };
 
-  const handleLoginSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-
-    if (!loginUsername || !loginPassword) {
-      toast({
-        title: "请填写完整信息",
-        variant: "destructive",
-      });
-      return;
-    }
-
-    setLoginLoading(true);
-    try {
-      const result = await login(loginUsername, loginPassword);
-      if (result.ok) {
-        toast({
-          title: "登录成功",
-          description: "欢迎回来！",
-          variant: "success",
-        });
-        router.replace("/dashboard");
-      } else {
-        const message = result.message || "用户名或密码错误";
-        const disabled = /禁用/.test(message);
-        toast({
-          title: disabled ? "账户已被禁用" : "登录失败",
-          description: disabled ? "请联系管理员处理" : message,
-          variant: "destructive",
-        });
-      }
-    } catch (error: any) {
-      toast({
-        title: "登录失败",
-        description: error.message || "请检查网络连接",
-        variant: "destructive",
-      });
-    } finally {
-      setLoginLoading(false);
-    }
-  };
-
   return (
     <main className="relative flex min-h-screen w-full items-center justify-center p-4">
       <motion.div
@@ -405,8 +352,7 @@ export default function RegisterPage() {
         transition={{ duration: 0.35, ease: "easeOut" }}
         className="relative z-10 w-full max-w-[1100px]"
       >
-        <Tabs value={activeTab} onValueChange={setActiveTab} className="w-full">
-          <Card className="grid gap-6 overflow-hidden border-border/70 bg-card/78 shadow-2xl backdrop-blur-xl lg:grid-cols-[300px_minmax(0,1fr)]">
+        <Card className="grid gap-6 overflow-hidden border-border/70 bg-card/78 shadow-2xl backdrop-blur-xl lg:grid-cols-[300px_minmax(0,1fr)]">
             <div className="space-y-6 border-b border-border/70 p-6 lg:border-b-0 lg:border-r lg:p-8">
               <div className="space-y-2">
                 <div className="flex h-14 w-14 items-center justify-center rounded-2xl bg-primary/14 text-primary">
@@ -418,17 +364,6 @@ export default function RegisterPage() {
                     系统账号用于网页登录与个人设置；Emby 账号用于媒体播放，两者注册入口已分离。
                   </p>
                 </div>
-              </div>
-
-              <div className="w-full">
-                <TabsList className="grid grid-cols-2 gap-2 lg:grid-cols-1">
-                  <TabsTrigger value="register" className="rounded-2xl py-3 font-semibold data-[state=active]:bg-primary data-[state=active]:text-primary-foreground">
-                    注册
-                  </TabsTrigger>
-                  <TabsTrigger value="login" className="rounded-2xl py-3 font-semibold data-[state=active]:bg-primary data-[state=active]:text-primary-foreground">
-                    登录
-                  </TabsTrigger>
-                </TabsList>
               </div>
 
               <div className="rounded-2xl border border-border/70 bg-muted/40 p-4 text-sm text-muted-foreground">
@@ -459,8 +394,7 @@ export default function RegisterPage() {
               </div>
             </div>
 
-            <div className="p-6 sm:p-8">
-              <TabsContent value="register" className="space-y-6">
+            <div className="space-y-6 p-6 sm:p-8">
                 <div className="space-y-3">
                   <CardTitle className="text-2xl font-semibold tracking-tight">创建账号</CardTitle>
                   <Tabs value={registerTarget} onValueChange={(v) => setRegisterTarget(v as RegisterTarget)} className="w-full">
@@ -632,9 +566,38 @@ export default function RegisterPage() {
                         </Button>
                       ) : null}
                       {bindCode && !bindConfirmed ? (
-                        <div className="rounded-lg border border-border/70 bg-muted/50 px-3 py-2 text-sm text-muted-foreground">
-                          <p>请到 Bot 私聊发送：</p>
-                          <p className="font-mono text-base text-foreground">/bind {bindCode}</p>
+                        <div className="basis-full space-y-2 rounded-lg border border-border/70 bg-muted/50 px-3 py-3 text-sm text-muted-foreground">
+                          <p>请到 Bot 私聊发送下面这条命令：</p>
+                          <div className="flex flex-wrap items-center gap-2">
+                            <code className="rounded bg-background px-2 py-1 font-mono text-base text-foreground select-all">
+                              /bind {bindCode}
+                            </code>
+                            <Button
+                              type="button"
+                              size="sm"
+                              variant="outline"
+                              onClick={() => {
+                                navigator.clipboard.writeText(`/bind ${bindCode}`).then(
+                                  () => toast({ title: "已复制到剪贴板", variant: "success" }),
+                                  () => toast({ title: "复制失败", variant: "destructive" }),
+                                );
+                              }}
+                            >
+                              复制命令
+                            </Button>
+                            {systemInfo?.telegram_bot?.url ? (
+                              <Button asChild type="button" size="sm">
+                                <a
+                                  href={systemInfo.telegram_bot.url}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                >
+                                  <Bot className="mr-2 h-4 w-4" />
+                                  打开 @{systemInfo.telegram_bot.username}
+                                </a>
+                              </Button>
+                            ) : null}
+                          </div>
                           <p className="flex items-center gap-1 text-xs">
                             <Loader2 className="h-3 w-3 animate-spin" />
                             等待 Bot 端验证…（剩余 {Math.max(0, Math.floor(bindCodeExpiry / 60))} 分钟）
@@ -717,7 +680,7 @@ export default function RegisterPage() {
                         <Button
                           type="button"
                           className="mt-3"
-                          onClick={() => setActiveTab("login")}
+                          onClick={() => router.push("/login")}
                         >
                           <Bot className="mr-2 h-4 w-4" />
                           前往登录
@@ -726,68 +689,8 @@ export default function RegisterPage() {
                     ) : null}
                   </div>
                 ) : null}
-              </TabsContent>
-
-              <TabsContent value="login" className="space-y-6">
-                <div className="space-y-2 text-center">
-                  <CardTitle className="text-2xl font-semibold tracking-tight">已有账号</CardTitle>
-                  <CardDescription className="text-sm text-muted-foreground">
-                    使用系统账号登录网页端。
-                  </CardDescription>
-                </div>
-
-                <form onSubmit={handleLoginSubmit} className="space-y-5">
-                  <div className="space-y-2">
-                    <Label htmlFor="loginUsername" className="ml-1">用户名</Label>
-                    <Input
-                      id="loginUsername"
-                      placeholder="Username"
-                      value={loginUsername}
-                      onChange={(e) => setLoginUsername(e.target.value)}
-                      className="h-11"
-                    />
-                  </div>
-
-                  <div className="space-y-2">
-                    <Label htmlFor="loginPassword" className="ml-1">密码</Label>
-                    <div className="relative">
-                      <Input
-                        id="loginPassword"
-                        type={showPassword ? "text" : "password"}
-                        placeholder="Password"
-                        value={loginPassword}
-                        onChange={(e) => setLoginPassword(e.target.value)}
-                        className="h-11 pr-10"
-                      />
-                      <button
-                        type="button"
-                        onClick={() => setShowPassword(!showPassword)}
-                        className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
-                      >
-                        {showPassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
-                      </button>
-                    </div>
-                  </div>
-
-                  <div className="pt-2">
-                    <Button
-                      type="submit"
-                      className="h-11 w-full"
-                      disabled={loginLoading}
-                    >
-                      {loginLoading ? (
-                        <Loader2 className="mr-2 h-5 w-5 animate-spin" />
-                      ) : (
-                        <ArrowRight className="mr-2 h-5 w-5" />
-                      )}
-                      立即登录
-                    </Button>
-                  </div>
-                </form>
-              </TabsContent>
             </div>
           </Card>
-        </Tabs>
       </motion.div>
     </main>
   );

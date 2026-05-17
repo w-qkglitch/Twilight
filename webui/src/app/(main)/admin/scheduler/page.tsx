@@ -8,23 +8,40 @@ import {
   Loader2,
   PlayCircle,
   RefreshCw,
+  RotateCcw,
+  Settings2,
   TimerReset,
   XCircle,
 } from "lucide-react";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import {
   Dialog,
   DialogContent,
   DialogDescription,
+  DialogFooter,
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
 import { useToast } from "@/hooks/use-toast";
 import { useAsyncResource } from "@/hooks/use-async-resource";
 import { PageError } from "@/components/layout/page-state";
-import { api, type SchedulerJobItem, type SchedulerJobRun } from "@/lib/api";
+import {
+  api,
+  type SchedulerJobItem,
+  type SchedulerJobRun,
+  type SchedulerTriggerSpec,
+} from "@/lib/api";
 
 function formatTimestamp(seconds: number | null | undefined): string {
   if (!seconds) return "—";
@@ -95,6 +112,231 @@ function renderSummaryChips(summary: SchedulerJobRun["summary"]) {
   );
 }
 
+function describeTriggerSpec(spec: SchedulerTriggerSpec | undefined | null): string {
+  if (!spec) return "—";
+  if (spec.type === "cron_daily") {
+    const hh = String(spec.hour).padStart(2, "0");
+    const mm = String(spec.minute).padStart(2, "0");
+    return `每日 ${hh}:${mm}`;
+  }
+  const s = spec.seconds;
+  if (s % 3600 === 0) return `每 ${s / 3600} 小时`;
+  if (s % 60 === 0) return `每 ${s / 60} 分钟`;
+  return `每 ${s} 秒`;
+}
+
+const INTERVAL_UNITS = [
+  { value: "minutes", label: "分钟", multiplier: 60 },
+  { value: "hours", label: "小时", multiplier: 3600 },
+] as const;
+type IntervalUnit = (typeof INTERVAL_UNITS)[number]["value"];
+
+function secondsToUnit(seconds: number): { value: number; unit: IntervalUnit } {
+  if (seconds > 0 && seconds % 3600 === 0) return { value: seconds / 3600, unit: "hours" };
+  return { value: Math.max(1, Math.round(seconds / 60)), unit: "minutes" };
+}
+
+interface ScheduleEditorProps {
+  job: SchedulerJobItem | null;
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  onSaved: () => Promise<unknown> | unknown;
+}
+
+function ScheduleEditor({ job, open, onOpenChange, onSaved }: ScheduleEditorProps) {
+  const { toast } = useToast();
+  const [type, setType] = useState<SchedulerTriggerSpec["type"]>("cron_daily");
+  const [hour, setHour] = useState(0);
+  const [minute, setMinute] = useState(0);
+  const [intervalValue, setIntervalValue] = useState(1);
+  const [intervalUnit, setIntervalUnit] = useState<IntervalUnit>("hours");
+  const [saving, setSaving] = useState(false);
+  const [resetting, setResetting] = useState(false);
+
+  // 打开时把当前值填进表单
+  useEffect(() => {
+    if (!open || !job) return;
+    const spec = job.trigger_spec;
+    setType(spec.type);
+    if (spec.type === "cron_daily") {
+      setHour(spec.hour);
+      setMinute(spec.minute);
+      const { value, unit } = secondsToUnit(3600);
+      setIntervalValue(value);
+      setIntervalUnit(unit);
+    } else {
+      const { value, unit } = secondsToUnit(spec.seconds);
+      setIntervalValue(value);
+      setIntervalUnit(unit);
+      setHour(0);
+      setMinute(0);
+    }
+  }, [open, job]);
+
+  if (!job) return null;
+
+  const handleSave = async () => {
+    setSaving(true);
+    try {
+      let payload: SchedulerTriggerSpec;
+      if (type === "cron_daily") {
+        if (hour < 0 || hour > 23 || minute < 0 || minute > 59) {
+          toast({ title: "时间不合法", description: "小时 0-23 / 分钟 0-59", variant: "destructive" });
+          return;
+        }
+        payload = { type: "cron_daily", hour: Math.trunc(hour), minute: Math.trunc(minute) };
+      } else {
+        const multiplier = INTERVAL_UNITS.find((u) => u.value === intervalUnit)!.multiplier;
+        const seconds = Math.trunc(intervalValue * multiplier);
+        if (seconds < 60) {
+          toast({ title: "间隔过短", description: "最小 1 分钟", variant: "destructive" });
+          return;
+        }
+        if (seconds > 7 * 86400) {
+          toast({ title: "间隔过长", description: "最长 7 天", variant: "destructive" });
+          return;
+        }
+        payload = { type: "interval", seconds };
+      }
+      const res = await api.setSchedulerJobSchedule(job.id, payload);
+      if (res.success) {
+        toast({ title: "已更新", description: describeTriggerSpec(res.data?.trigger_spec), variant: "success" });
+        onOpenChange(false);
+        await onSaved();
+      } else {
+        toast({ title: "更新失败", description: res.message, variant: "destructive" });
+      }
+    } catch (err: any) {
+      toast({ title: "更新失败", description: err.message || "网络异常", variant: "destructive" });
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleReset = async () => {
+    setResetting(true);
+    try {
+      const res = await api.resetSchedulerJobSchedule(job.id);
+      if (res.success) {
+        toast({ title: "已恢复默认", description: describeTriggerSpec(res.data?.trigger_spec), variant: "success" });
+        onOpenChange(false);
+        await onSaved();
+      } else {
+        toast({ title: "恢复失败", description: res.message, variant: "destructive" });
+      }
+    } catch (err: any) {
+      toast({ title: "恢复失败", description: err.message || "网络异常", variant: "destructive" });
+    } finally {
+      setResetting(false);
+    }
+  };
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="sm:max-w-md">
+        <DialogHeader>
+          <DialogTitle>编辑触发器 · {job.name}</DialogTitle>
+          <DialogDescription>
+            当前：{describeTriggerSpec(job.trigger_spec)}
+            {job.is_custom ? " · 已自定义" : ` · 默认（${describeTriggerSpec(job.default_trigger_spec)}）`}
+          </DialogDescription>
+        </DialogHeader>
+
+        <div className="space-y-4">
+          <div className="space-y-2">
+            <Label>触发模式</Label>
+            <Select value={type} onValueChange={(v) => setType(v as SchedulerTriggerSpec["type"])}>
+              <SelectTrigger>
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="cron_daily">每日固定时间</SelectItem>
+                <SelectItem value="interval">固定间隔</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
+
+          {type === "cron_daily" ? (
+            <div className="grid grid-cols-2 gap-3">
+              <div className="space-y-2">
+                <Label>小时 (0-23)</Label>
+                <Input
+                  type="number"
+                  min={0}
+                  max={23}
+                  value={hour}
+                  onChange={(e) => setHour(Number(e.target.value) || 0)}
+                />
+              </div>
+              <div className="space-y-2">
+                <Label>分钟 (0-59)</Label>
+                <Input
+                  type="number"
+                  min={0}
+                  max={59}
+                  value={minute}
+                  onChange={(e) => setMinute(Number(e.target.value) || 0)}
+                />
+              </div>
+            </div>
+          ) : (
+            <div className="grid grid-cols-[1fr_120px] gap-3">
+              <div className="space-y-2">
+                <Label>每</Label>
+                <Input
+                  type="number"
+                  min={1}
+                  value={intervalValue}
+                  onChange={(e) => setIntervalValue(Number(e.target.value) || 1)}
+                />
+              </div>
+              <div className="space-y-2">
+                <Label>单位</Label>
+                <Select value={intervalUnit} onValueChange={(v) => setIntervalUnit(v as IntervalUnit)}>
+                  <SelectTrigger>
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {INTERVAL_UNITS.map((u) => (
+                      <SelectItem key={u.value} value={u.value}>
+                        {u.label}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+            </div>
+          )}
+
+          <p className="text-xs text-muted-foreground">
+            修改后立即生效并落库，重启进程后仍保留。可点击「恢复默认」清除覆盖。
+          </p>
+        </div>
+
+        <DialogFooter className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-between">
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={handleReset}
+            disabled={resetting || !job.is_custom}
+            title={job.is_custom ? "清除自定义，恢复 config.toml 默认值" : "当前已是默认值"}
+          >
+            {resetting ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <RotateCcw className="mr-2 h-4 w-4" />}
+            恢复默认
+          </Button>
+          <div className="flex gap-2 sm:justify-end">
+            <Button variant="outline" onClick={() => onOpenChange(false)}>取消</Button>
+            <Button onClick={handleSave} disabled={saving}>
+              {saving && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+              保存
+            </Button>
+          </div>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
 function StatusBadge({ job }: { job: SchedulerJobItem }) {
   if (job.is_running || job.last_run?.status === "running") {
     return (
@@ -138,6 +380,9 @@ export default function AdminSchedulerPage() {
   const [logsDetail, setLogsDetail] = useState<SchedulerJobRun | null>(null);
   const [logsHistory, setLogsHistory] = useState<SchedulerJobRun[]>([]);
   const [logsLoading, setLogsLoading] = useState(false);
+
+  // 触发器编辑器
+  const [scheduleJob, setScheduleJob] = useState<SchedulerJobItem | null>(null);
 
   const loadJobs = useCallback(async () => {
     const res = await api.listSchedulerJobs();
@@ -269,7 +514,10 @@ export default function AdminSchedulerPage() {
                     <div className="flex items-center gap-2">
                       <CalendarClock className="h-3.5 w-3.5 shrink-0" />
                       <span className="truncate">
-                        计划：{job.enabled ? job.schedule || "已注册" : "未启用"}
+                        触发：{describeTriggerSpec(job.trigger_spec)}
+                        {job.is_custom && (
+                          <Badge variant="outline" className="ml-1.5 text-[10px] px-1 py-0">已自定义</Badge>
+                        )}
                       </span>
                     </div>
                     <div className="flex items-center gap-2">
@@ -323,6 +571,14 @@ export default function AdminSchedulerPage() {
                     <Button
                       variant="outline"
                       size="icon"
+                      onClick={() => setScheduleJob(job)}
+                      title="编辑触发器"
+                    >
+                      <Settings2 className="h-4 w-4" />
+                    </Button>
+                    <Button
+                      variant="outline"
+                      size="icon"
                       onClick={() => void openLogs(job)}
                       title="查看运行日志"
                     >
@@ -335,6 +591,13 @@ export default function AdminSchedulerPage() {
           })}
         </div>
       )}
+
+      <ScheduleEditor
+        job={scheduleJob}
+        open={Boolean(scheduleJob)}
+        onOpenChange={(open) => { if (!open) setScheduleJob(null); }}
+        onSaved={refresh}
+      />
 
       <Dialog open={Boolean(logsJob)} onOpenChange={(open) => { if (!open) { setLogsJob(null); setLogsDetail(null); setLogsHistory([]); } }}>
         <DialogContent className="max-h-[85vh] w-[92vw] max-w-3xl overflow-hidden p-0 sm:max-w-3xl">

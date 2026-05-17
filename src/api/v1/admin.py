@@ -1657,3 +1657,61 @@ async def admin_scheduler_job_history(job_id: str):
         'total': len(history),
     })
 
+
+@admin_bp.route('/scheduler/jobs/<string:job_id>/schedule', methods=['PUT'])
+@require_auth
+@require_admin
+async def admin_set_scheduler_job_schedule(job_id: str):
+    """覆盖指定 job 的触发器并实时 reschedule，同时落库。
+
+    Request body:
+        {"type": "cron_daily", "hour": 3, "minute": 0}
+        {"type": "interval", "seconds": 3600}
+    """
+    from src.services.scheduler_service import SchedulerService
+
+    data = request.get_json(silent=True) or {}
+    trigger_type = (data.get('type') or '').strip()
+    if not trigger_type:
+        return api_response(False, "缺少 type 字段", code=400)
+
+    hour = data.get('hour')
+    minute = data.get('minute')
+    seconds = data.get('seconds')
+
+    ok, message, spec = await SchedulerService.set_job_schedule(
+        job_id,
+        trigger_type=trigger_type,
+        hour=int(hour) if hour is not None else None,
+        minute=int(minute) if minute is not None else None,
+        seconds=int(seconds) if seconds is not None else None,
+    )
+    logger.info(
+        f"管理员 {g.current_user.USERNAME} 修改 scheduler 触发器: "
+        f"{job_id} -> ok={ok} type={trigger_type} message={message}"
+    )
+    return api_response(
+        ok, message,
+        {'job_id': job_id, 'trigger_spec': spec, 'is_custom': True} if ok else None,
+        code=200 if ok else 400,
+    )
+
+
+@admin_bp.route('/scheduler/jobs/<string:job_id>/schedule', methods=['DELETE'])
+@require_auth
+@require_admin
+async def admin_reset_scheduler_job_schedule(job_id: str):
+    """删除指定 job 的触发器覆盖，恢复到 config.toml 默认值。"""
+    from src.services.scheduler_service import SchedulerService
+
+    ok, message, spec = await SchedulerService.reset_job_schedule(job_id)
+    logger.info(
+        f"管理员 {g.current_user.USERNAME} 重置 scheduler 触发器: "
+        f"{job_id} -> ok={ok} message={message}"
+    )
+    return api_response(
+        ok, message,
+        {'job_id': job_id, 'trigger_spec': spec, 'is_custom': False} if ok else None,
+        code=200 if ok else 400,
+    )
+

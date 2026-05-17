@@ -162,6 +162,11 @@ async def my_job(ctx: RunContext):
 ```
 
 并在 `JOB_DEFINITIONS` / `_resolve_job` 中注册，否则管理后台看不到、无法手动触发。
+新 job 的 `JOB_DEFINITIONS` 条目里 `default_trigger` 字段决定首次启动时的触发规则
+（`cron_daily` 用 `config_field` 指向 `SchedulerConfig` / `TelegramConfig` 的 HH:MM
+字符串，`interval` 用 `config_field + unit` 指向数值），管理员后续可以通过
+`PUT /admin/scheduler/jobs/<id>/schedule` 写入覆盖到 `db/scheduler_schedule.db`，
+覆盖在进程重启后仍生效；要恢复默认走 `DELETE` 同一端点。
 前端展示的中文标签在 `webui/src/app/(main)/admin/scheduler/page.tsx` 的
 `SUMMARY_LABELS` 字典里维护，新增 summary 键时同步补一行翻译。
 

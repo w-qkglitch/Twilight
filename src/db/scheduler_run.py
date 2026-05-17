@@ -140,28 +140,33 @@ class SchedulerRunOperate:
 
     @staticmethod
     async def trim_history(job_id: str, *, keep: Optional[int] = None) -> int:
-        """按 job 保留最近 `keep` 条，返回删除条数。"""
+        """按 job 保留最近 `keep` 条，返回删除条数。
+
+        注意：SQLAlchemy 2.x AsyncSession 的 `execute()` 会 autobegin 一个事务，
+        在那之后再调 `session.begin()` 会抛 "A transaction is already begun"。
+        所以 select + delete 必须在同一个事务里。
+        """
         limit = keep if keep is not None else SchedulerRunOperate.HISTORY_LIMIT_PER_JOB
         if limit <= 0:
             return 0
         async with SchedulerRunSessionFactory() as session:
-            ids_to_keep_q = (
-                select(SchedulerRunModel.ID)
-                .where(SchedulerRunModel.JOB_ID == job_id)
-                .order_by(desc(SchedulerRunModel.ID))
-                .limit(limit)
-            )
-            keep_rows = (await session.execute(ids_to_keep_q)).scalars().all()
-            if not keep_rows:
-                return 0
-            min_keep = min(keep_rows)
             async with session.begin():
+                ids_to_keep_q = (
+                    select(SchedulerRunModel.ID)
+                    .where(SchedulerRunModel.JOB_ID == job_id)
+                    .order_by(desc(SchedulerRunModel.ID))
+                    .limit(limit)
+                )
+                keep_rows = (await session.execute(ids_to_keep_q)).scalars().all()
+                if not keep_rows:
+                    return 0
+                min_keep = min(keep_rows)
                 result = await session.execute(
                     delete(SchedulerRunModel)
                     .where(SchedulerRunModel.JOB_ID == job_id)
                     .where(SchedulerRunModel.ID < min_keep)
                 )
-            return int(result.rowcount or 0)
+                return int(result.rowcount or 0)
 
     @staticmethod
     async def get_last_run(job_id: str) -> Optional[dict]:

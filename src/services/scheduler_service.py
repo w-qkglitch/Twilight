@@ -4,8 +4,17 @@ import time
 from typing import Any, Awaitable, Callable, Optional
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.triggers.cron import CronTrigger
+from apscheduler.triggers.interval import IntervalTrigger
 from src.config import RegisterConfig, SchedulerConfig, TelegramConfig
 from src.db.scheduler_run import SchedulerRunOperate
+from src.db.scheduler_schedule import (
+    MAX_INTERVAL_SECONDS,
+    MIN_INTERVAL_SECONDS,
+    SchedulerScheduleOperate,
+    TRIGGER_CRON_DAILY,
+    TRIGGER_INTERVAL,
+)
 from src.db.user import UserOperate
 from src.services import get_emby_client, EmbyService
 from src.core.utils import timestamp, format_duration
@@ -49,47 +58,70 @@ class SchedulerService:
     _running: set[str] = set()
 
     # ============== Job 元数据注册表（用于前端列表 / 手动触发权限） ==============
-    # 每条目: id, name, description, manual(是否允许手动触发)
+    # 每条目: id, name, description, default_trigger(默认触发器规格)
+    # default_trigger 取值：
+    #   {'type': 'cron_daily', 'hour_from': 'EXPIRED_CHECK_TIME', 'offset_minutes': 0}
+    #   {'type': 'interval', 'seconds_from': ('SchedulerConfig', 'SESSION_CLEANUP_INTERVAL', 3600)}
+    # 解析在 `_resolve_default_trigger` 里完成，避免硬编码具体配置字段读法
     JOB_DEFINITIONS = [
         {
             'id': 'check_expired',
             'name': '过期用户检查',
             'description': '查找已过期账号，禁用本地状态并同步禁用 Emby 账户。',
+            'default_trigger': {'type': 'cron_daily', 'config_field': 'EXPIRED_CHECK_TIME'},
         },
         {
             'id': 'check_expiring',
             'name': '即将过期检查',
             'description': '记录 3 天内到期的账号，供后续提醒任务使用。',
+            'default_trigger': {'type': 'cron_daily', 'config_field': 'EXPIRING_CHECK_TIME'},
         },
         {
             'id': 'expiry_reminders',
             'name': '到期提醒推送',
             'description': '向到期前 N 天的用户发送提醒消息。',
+            'default_trigger': {
+                'type': 'cron_daily', 'config_field': 'EXPIRING_CHECK_TIME', 'offset_minutes': 5,
+            },
         },
         {
             'id': 'daily_stats',
             'name': '每日统计汇总',
             'description': '汇总注册用户 / 活跃用户 / 注册码 / Emby 状态写入日志。',
+            'default_trigger': {'type': 'cron_daily', 'config_field': 'DAILY_STATS_TIME'},
         },
         {
             'id': 'cleanup_sessions',
             'name': '不活跃会话清理',
             'description': '巡检 Emby 当前会话数。',
+            'default_trigger': {
+                'type': 'interval', 'config_field': 'SESSION_CLEANUP_INTERVAL', 'unit': 'hours',
+            },
         },
         {
             'id': 'emby_sync',
             'name': 'Emby 用户同步',
             'description': '校对本地 EMBYID、用户名、启停状态与下载权限。',
+            'default_trigger': {
+                'type': 'interval', 'config_field': 'EMBY_SYNC_INTERVAL', 'unit': 'hours',
+            },
         },
         {
             'id': 'cleanup_no_emby',
             'name': '无 Emby 账户用户清理',
             'description': '清理注册超过配置天数仍未创建 Emby 账户的用户。开关：AUTO_CLEANUP_NO_EMBY',
+            'default_trigger': {
+                'type': 'cron_daily', 'config_field': 'EXPIRED_CHECK_TIME', 'offset_minutes': 30,
+            },
         },
         {
             'id': 'enforce_group_membership',
             'name': 'Telegram 群组成员资格巡检',
             'description': '检查已绑定 Telegram 的用户是否仍在必需群组内；不在则禁用本地账号 + Emby。开关：REQUIRE_GROUP_MEMBERSHIP',
+            'default_trigger': {
+                'type': 'interval', 'config_field': 'GROUP_CHECK_INTERVAL_MINUTES',
+                'unit': 'minutes', 'source': 'TelegramConfig',
+            },
         },
     ]
 
@@ -196,21 +228,94 @@ class SchedulerService:
         runner.__name__ = f"_run_{job_id}"
         return runner
 
+    # ============== 触发器解析 ==============
+
+    @staticmethod
+    def _parse_time_str(time_str: str) -> tuple[int, int]:
+        try:
+            hour, minute = map(int, time_str.split(':'))
+            return hour, minute
+        except Exception:
+            return 0, 0
+
+    @classmethod
+    def _resolve_default_trigger(cls, definition: dict) -> dict:
+        """根据 JOB_DEFINITIONS 的 default_trigger 描述，解析出当前 config.toml 下的实际触发器。
+
+        返回结构：
+            {'type': 'cron_daily', 'hour': 3, 'minute': 0}
+            {'type': 'interval', 'seconds': 3600}
+        """
+        spec = definition.get('default_trigger', {})
+        field = spec.get('config_field')
+        source = spec.get('source', 'SchedulerConfig')
+        config_obj = SchedulerConfig if source == 'SchedulerConfig' else TelegramConfig
+        raw = getattr(config_obj, field, None) if field else None
+
+        if spec.get('type') == 'cron_daily':
+            h, m = cls._parse_time_str(str(raw or '00:00'))
+            offset = int(spec.get('offset_minutes', 0))
+            total = (h * 60 + m + offset) % (24 * 60)
+            return {'type': TRIGGER_CRON_DAILY, 'hour': total // 60, 'minute': total % 60}
+
+        if spec.get('type') == 'interval':
+            unit = spec.get('unit', 'hours')
+            try:
+                value = int(raw or 1)
+            except (TypeError, ValueError):
+                value = 1
+            multiplier = {'seconds': 1, 'minutes': 60, 'hours': 3600}.get(unit, 3600)
+            seconds = max(MIN_INTERVAL_SECONDS, min(MAX_INTERVAL_SECONDS, value * multiplier))
+            return {'type': TRIGGER_INTERVAL, 'seconds': seconds}
+
+        # 兜底：每 1 小时
+        return {'type': TRIGGER_INTERVAL, 'seconds': 3600}
+
+    @classmethod
+    async def _effective_trigger(cls, definition: dict) -> tuple[dict, bool]:
+        """优先取 DB override，其次回退默认。返回 (spec, is_custom)。"""
+        override = await SchedulerScheduleOperate.get_override(definition['id'])
+        if override:
+            if override['type'] == TRIGGER_CRON_DAILY and override.get('hour') is not None:
+                return (
+                    {'type': TRIGGER_CRON_DAILY,
+                     'hour': int(override['hour']),
+                     'minute': int(override.get('minute') or 0)},
+                    True,
+                )
+            if override['type'] == TRIGGER_INTERVAL and override.get('seconds'):
+                return (
+                    {'type': TRIGGER_INTERVAL, 'seconds': int(override['seconds'])},
+                    True,
+                )
+        return cls._resolve_default_trigger(definition), False
+
+    @staticmethod
+    def _trigger_from_spec(spec: dict):
+        """把内部 spec 转成 APScheduler 触发器对象。"""
+        if spec['type'] == TRIGGER_CRON_DAILY:
+            return CronTrigger(
+                hour=int(spec['hour']),
+                minute=int(spec['minute']),
+                timezone=SchedulerConfig.TIMEZONE,
+            )
+        return IntervalTrigger(
+            seconds=int(spec['seconds']),
+            timezone=SchedulerConfig.TIMEZONE,
+        )
+
+    @classmethod
+    def _get_definition(cls, job_id: str) -> Optional[dict]:
+        for d in cls.JOB_DEFINITIONS:
+            if d['id'] == job_id:
+                return d
+        return None
+
     # ============== 手动触发入口（管理员 API 调用） ==============
 
     @classmethod
-    def _resolve_job(cls, job_id: str) -> Optional[Callable[[], Awaitable[None]]]:
-        mapping: dict[str, Callable[[], Awaitable[None]]] = {
-            'check_expired': cls.check_expired_users,
-            'check_expiring': cls.check_expiring_users,
-            'expiry_reminders': cls.send_expiry_reminders,
-            'daily_stats': cls.daily_stats,
-            'cleanup_sessions': cls.cleanup_inactive_sessions,
-            'emby_sync': cls.emby_sync,
-            'cleanup_no_emby': cls.cleanup_no_emby_users,
-            'enforce_group_membership': cls.enforce_group_membership,
-        }
-        return mapping.get(job_id)
+    def _resolve_job(cls, job_id: str) -> Optional[Callable[..., Awaitable[Any]]]:
+        return cls._job_fn_map().get(job_id)
 
     @classmethod
     async def trigger_job(cls, job_id: str) -> tuple[bool, str, Optional[dict]]:
@@ -252,6 +357,8 @@ class SchedulerService:
 
         last_run 优先取数据库里的最后一条（重启后仍有效），
         正在运行中的 job 用内存 `_last_runs` 覆盖以拿到「未结束」状态。
+        每个 job 同时返回 `trigger_spec`（结构化的 cron_daily/interval 描述）
+        和 `is_custom`（是否启用了管理员手动覆盖）供前端编辑器使用。
         """
         sched = cls._scheduler
         scheduled_map: dict[str, object] = {}
@@ -282,13 +389,19 @@ class SchedulerService:
                     logger.warning(f"读取 scheduler_run 失败: {exc}")
                     last_run = cls._last_runs.get(jid)
 
+            trigger_spec, is_custom = await cls._effective_trigger(definition)
+            default_spec = cls._resolve_default_trigger(definition)
+
             items.append({
-                **definition,
+                **{k: v for k, v in definition.items() if k != 'default_trigger'},
                 'enabled': scheduled is not None,
                 'schedule': schedule_str,
                 'next_run_at': next_run,
                 'last_run': last_run,
                 'is_running': is_running,
+                'trigger_spec': trigger_spec,
+                'default_trigger_spec': default_spec,
+                'is_custom': is_custom,
             })
         return items
 
@@ -457,6 +570,16 @@ class SchedulerService:
             ctx.log("ℹ️ 群组成员巡检未启用")
             return
 
+        # Bot 未就绪时直接退出。继续往下跑会让 check_user_in_groups 对每个
+        # 用户都返回 (True, []) —— 这会把所有用户误判为「仍在群」，并产生
+        # 一段误导的"815 仍在群、0 已禁用"日志（其实根本没真正检查）。
+        if not TelegramMembershipService.is_bot_available():
+            ctx.summary['enabled'] = True
+            ctx.summary['bot_unavailable'] = True
+            ctx.summary['scanned'] = 0
+            ctx.log("⚠️ Bot 未就绪，无法发起群组成员检查；本次跳过，等待 Bot 初始化后下次再跑")
+            return
+
         ctx.summary['enabled'] = True
         ctx.log("🛂 开始群组成员资格巡检...")
         try:
@@ -565,63 +688,140 @@ class SchedulerService:
         except RuntimeError:
             cls._scheduler_loop = None
 
-        # 解析配置时间
-        def parse_time(time_str):
-            try:
-                hour, minute = map(int, time_str.split(':'))
-                return hour, minute
-            except Exception:
-                return 0, 0
-
-        # 注册定时任务（所有 add_job 都包一层 last-run 追踪）
-        h, m = parse_time(SchedulerConfig.EXPIRED_CHECK_TIME)
-        scheduler.add_job(cls._make_scheduled('check_expired', cls.check_expired_users), 'cron', hour=h, minute=m, id='check_expired')
-
-        h, m = parse_time(SchedulerConfig.EXPIRING_CHECK_TIME)
-        scheduler.add_job(cls._make_scheduled('check_expiring', cls.check_expiring_users), 'cron', hour=h, minute=m, id='check_expiring')
-        scheduler.add_job(cls._make_scheduled('expiry_reminders', cls.send_expiry_reminders), 'cron', hour=h, minute=(m + 5) % 60, id='expiry_reminders')
-
-        h, m = parse_time(SchedulerConfig.DAILY_STATS_TIME)
-        scheduler.add_job(cls._make_scheduled('daily_stats', cls.daily_stats), 'cron', hour=h, minute=m, id='daily_stats')
-
-        scheduler.add_job(cls._make_scheduled('cleanup_sessions', cls.cleanup_inactive_sessions), 'interval', hours=SchedulerConfig.SESSION_CLEANUP_INTERVAL, id='cleanup_sessions')
-
-        # Emby 数据同步（每 6 小时）
-        scheduler.add_job(cls._make_scheduled('emby_sync', cls.emby_sync), 'interval', hours=SchedulerConfig.EMBY_SYNC_INTERVAL, id='emby_sync')
-
-        # 无 Emby 账户用户清理（每天过期检查后执行）
-        h_cleanup, m_cleanup = parse_time(SchedulerConfig.EXPIRED_CHECK_TIME)
-        scheduler.add_job(cls._make_scheduled('cleanup_no_emby', cls.cleanup_no_emby_users), 'cron', hour=h_cleanup, minute=(m_cleanup + 30) % 60, id='cleanup_no_emby')
-
-        # 群组成员资格巡检（开关 + 群组配置齐备时才注册）
-        from src.services.telegram_membership import TelegramMembershipService
-        if TelegramMembershipService.enforcement_enabled():
-            interval_minutes = max(1, int(TelegramConfig.GROUP_CHECK_INTERVAL_MINUTES or 30))
-            scheduler.add_job(
-                cls._make_scheduled('enforce_group_membership', cls.enforce_group_membership),
-                'interval',
-                minutes=interval_minutes,
-                id='enforce_group_membership',
-            )
-
+        await cls._install_all_jobs()
         scheduler.start()
+
         logger.info("=" * 50)
         logger.info(f"🌙 Twilight Scheduler 已启动 ({SchedulerConfig.TIMEZONE})")
-        logger.info(f"  - 过期检查: {SchedulerConfig.EXPIRED_CHECK_TIME}")
-        logger.info(f"  - 到期提醒: {SchedulerConfig.EXPIRING_CHECK_TIME}")
-        logger.info(f"  - 每日统计: {SchedulerConfig.DAILY_STATS_TIME}")
-        logger.info(f"  - 会话清理: 每 {SchedulerConfig.SESSION_CLEANUP_INTERVAL} 小时")
-        logger.info(f"  - Emby 同步: 每 {SchedulerConfig.EMBY_SYNC_INTERVAL} 小时")
-        if RegisterConfig.AUTO_CLEANUP_NO_EMBY:
-            logger.info(f"  - 无 Emby 清理: {SchedulerConfig.EXPIRED_CHECK_TIME} (注册超 {RegisterConfig.AUTO_CLEANUP_NO_EMBY_DAYS} 天)")
-        if TelegramMembershipService.enforcement_enabled():
-            logger.info(
-                f"  - 群组成员巡检: 每 {max(1, int(TelegramConfig.GROUP_CHECK_INTERVAL_MINUTES or 30))} 分钟"
-            )
+        for j in scheduler.get_jobs():
+            logger.info(f"  - {j.id}: {j.trigger}")
         logger.info("=" * 50)
-        
+
         # 立即运行一次统计（走 tracking 包装，复用同一份 ctx/落库逻辑）
         await cls._run_with_tracking('daily_stats', cls.daily_stats, trigger='startup')
+
+    @classmethod
+    async def _install_all_jobs(cls) -> None:
+        """把 JOB_DEFINITIONS 里所有 job 注册（或重新注册）到 APScheduler。
+
+        每个 job 的实际触发器 = DB override（如有）else 默认（解析自 config）。
+        `enforce_group_membership` 只在 `REQUIRE_GROUP_MEMBERSHIP` + 群组配置齐备
+        时才注册；管理员后续通过 UI 改 schedule 也只有在功能开启时才会生效。
+        """
+        from src.services.telegram_membership import TelegramMembershipService
+        scheduler = cls.get_scheduler()
+        fn_map = cls._job_fn_map()
+
+        for definition in cls.JOB_DEFINITIONS:
+            jid = definition['id']
+            if jid == 'enforce_group_membership' and not TelegramMembershipService.enforcement_enabled():
+                continue
+            spec, _custom = await cls._effective_trigger(definition)
+            scheduler.add_job(
+                cls._make_scheduled(jid, fn_map[jid]),
+                trigger=cls._trigger_from_spec(spec),
+                id=jid,
+                replace_existing=True,
+            )
+
+    @classmethod
+    def _job_fn_map(cls) -> dict[str, Callable[..., Awaitable[Any]]]:
+        return {
+            'check_expired': cls.check_expired_users,
+            'check_expiring': cls.check_expiring_users,
+            'expiry_reminders': cls.send_expiry_reminders,
+            'daily_stats': cls.daily_stats,
+            'cleanup_sessions': cls.cleanup_inactive_sessions,
+            'emby_sync': cls.emby_sync,
+            'cleanup_no_emby': cls.cleanup_no_emby_users,
+            'enforce_group_membership': cls.enforce_group_membership,
+        }
+
+    # ============== 管理 API：在线修改 / 重置触发器 ==============
+
+    @classmethod
+    async def set_job_schedule(
+        cls,
+        job_id: str,
+        *,
+        trigger_type: str,
+        hour: Optional[int] = None,
+        minute: Optional[int] = None,
+        seconds: Optional[int] = None,
+    ) -> tuple[bool, str, Optional[dict]]:
+        """落库覆盖 + 实时 reschedule。返回 (ok, message, effective_spec)。"""
+        definition = cls._get_definition(job_id)
+        if not definition:
+            return False, f"未知任务: {job_id}", None
+
+        try:
+            override = await SchedulerScheduleOperate.upsert_override(
+                job_id,
+                trigger_type=trigger_type,
+                hour=hour,
+                minute=minute,
+                seconds=seconds,
+            )
+        except ValueError as exc:
+            return False, str(exc), None
+
+        spec, _custom = await cls._effective_trigger(definition)
+        ok, msg = await cls._apply_trigger(job_id, spec)
+        if not ok:
+            return False, msg, spec
+        return True, "已更新", spec
+
+    @classmethod
+    async def reset_job_schedule(cls, job_id: str) -> tuple[bool, str, Optional[dict]]:
+        """清除覆盖，恢复到 config.toml 默认值。"""
+        definition = cls._get_definition(job_id)
+        if not definition:
+            return False, f"未知任务: {job_id}", None
+
+        await SchedulerScheduleOperate.delete_override(job_id)
+        spec = cls._resolve_default_trigger(definition)
+        ok, msg = await cls._apply_trigger(job_id, spec)
+        if not ok:
+            return False, msg, spec
+        return True, "已恢复默认", spec
+
+    @classmethod
+    async def _apply_trigger(cls, job_id: str, spec: dict) -> tuple[bool, str]:
+        """在调度器所在 loop 上 reschedule。如果 job 尚未注册（例如群组功能未启用），
+        只更新 DB 覆盖，不报错——下次满足启用条件时会读到正确值。
+        """
+        scheduler = cls.get_scheduler()
+        if not scheduler.running:
+            return True, "调度器未启动，已落库待生效"
+
+        def _do():
+            try:
+                if scheduler.get_job(job_id):
+                    scheduler.reschedule_job(job_id, trigger=cls._trigger_from_spec(spec))
+                else:
+                    # 任务从未注册（如 enforce_group_membership 未启用）；安静返回
+                    pass
+            except Exception as exc:  # pragma: no cover - APScheduler 抛错时由外层捕获
+                raise RuntimeError(str(exc))
+
+        sched_loop = cls._scheduler_loop
+        try:
+            running_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            running_loop = None
+
+        try:
+            if sched_loop is not None and sched_loop is not running_loop:
+                fut = asyncio.run_coroutine_threadsafe(
+                    asyncio.to_thread(_do), sched_loop,
+                )
+                # reschedule 是个轻量同步调用，等一会拿结果即可
+                fut.result(timeout=5)
+            else:
+                _do()
+        except Exception as exc:
+            return False, f"reschedule 失败: {exc}"
+        return True, "已应用"
 
     @classmethod
     async def stop(cls):

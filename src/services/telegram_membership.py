@@ -69,6 +69,18 @@ class TelegramMembershipService:
         )
 
     @staticmethod
+    def is_bot_available() -> bool:
+        """Bot 已实例化并完成 PTB initialize 返回 True。"""
+        try:
+            from src.bot.bot import get_bot_instance
+        except Exception:  # pragma: no cover
+            return False
+        bot_instance = get_bot_instance()
+        return bool(
+            bot_instance and bot_instance.application and bot_instance.application.bot
+        )
+
+    @staticmethod
     async def check_user_in_groups(
         telegram_id: int,
         *,
