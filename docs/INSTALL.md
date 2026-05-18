@@ -1,509 +1,117 @@
 # Twilight 安装部署指南
 
-本文档详细说明如何在不同操作系统上安装和部署 Twilight 系统。
+本文档详细说明如何安装和部署 Twilight 系统。
+
+> **前置阅读**
+> 作者默认你具备一定的 Linux 与 Python 基础。如果完全不熟悉，建议先了解相关基础再尝试部署。
+
+> **关于 Docker**
+> 作者本人不喜欢 Docker，因此 **不提供** Docker 部署方案。
+> 如果你需要 Docker，请自行实现；请勿将"没有 Docker 方案"作为 Issue 提交，否则会被直接关闭。
 
 ## 目录
 
-- [环境要求](#环境要求)
-- [Windows 11 安装](#windows-11-安装)
-- [Linux 安装](#linux-安装)
-- [前端 WebUI 部署](#前端-webui-部署)
-- [配置说明](#配置说明)
-- [故障排除](#故障排除)
+- [Twilight 安装部署指南](#twilight-安装部署指南)
+  - [目录](#目录)
+  - [环境要求](#环境要求)
+    - [最低要求](#最低要求)
+    - [推荐配置](#推荐配置)
+    - [前置说明](#前置说明)
+  - [部署步骤](#部署步骤)
+    - [前端](#前端)
+    - [后端](#后端)
+  - [获取帮助](#获取帮助)
 
 ## 环境要求
 
 ### 最低要求
 
-- **Python**: 3.10+
-- **数据库**: SQLite（内置）或 PostgreSQL/MySQL（可选）
-- **Redis**: 可选（用于分布式部署或会话存储）
-- **内存**: 512MB+
-- **磁盘**: 2GB+（包含依赖和数据库）
+- **Python**：3.10+
+- **数据库**：SQLite（内置）或 PostgreSQL / MySQL（可选）
+- **Redis**：可选（用于分布式部署或会话存储）
+- **内存**：512 MB+
+- **磁盘**：2 GB+（含依赖与数据库）
 
 ### 推荐配置
 
-- **Python**: 3.11+
-- **系统**: Linux (Ubuntu 22.04+) 或 Windows 11
-- **内存**: 2GB+
-- **Redis**: 可选但推荐用于生产环境
+- **Python**：3.11+，搭配 [`uv`](https://github.com/astral-sh/uv) 管理依赖
+- **系统**：Linux（Ubuntu 22.04+）或 Windows 11
+- **内存**：2 GB+
+- **Redis**：按需
 
-## Windows 11 安装
+### 前置说明
 
-### 前置准备
+- 不推荐安装在 Windows 设备上
+- 前后端分离部署
 
-1. **安装 Python**
-   ```powershell
-   # 从 https://www.python.org 下载 Python 3.11+ Windows 安装程序
-   # 或使用包管理器
-   winget install Python.Python.3.11
-   
-   # 验证安装
-   python --version
-   pip --version
-   ```
+## 部署步骤
 
-2. **准备项目目录**
-   ```powershell
-   # 克隆或下载项目
+### 前端
+
+1. 登录 Cloudflare 与 GitHub。
+2. 打开 <https://github.com/Prejudice-Studio/Twilight> 并 Fork 到自己的账号下。
+3. 进入 Cloudflare 主页 → **构建 → 计算 → Workers 和 Pages**。
+4. 选择 **创建应用程序 → Continue with GitHub** 并登录 GitHub。
+5. 选择 Twilight 项目；**项目名称必须为 `twilight-webui`**，否则会出现问题。
+6. 填写以下配置：
+
+   - 构建命令：`pnpm opennextjs-cloudflare build`
+   - 部署命令：`pnpm opennextjs-cloudflare deploy`
+   - 版本命令：`pnpm opennextjs-cloudflare upload`
+   - 高级设置：
+     - 路径：`/webui`
+     - 环境变量：`NEXT_PUBLIC_API_URL` = `你的后端地址`
+
+7. 保存并部署，等待完成。
+8. 可选操作：
+   - 把 Pages 绑定到自己 Cloudflare 托管的域名。
+   - 在 Pages 的 **构建 → 部署挂钩** 添加 GitHub 仓库，实现自动部署（不放心可不加，手动部署即可）。
+
+### 后端
+
+1. 安装 Python / uv 环境。
+2. 克隆仓库并进入目录：
+
+   ```bash
    git clone https://github.com/Prejudice-Studio/Twilight.git
    cd Twilight
    ```
 
-### 安装步骤
+3. 创建并激活 Python / uv 虚拟环境。
+4. 安装依赖：
 
-1. **创建虚拟环境**
-   ```powershell
-   # 创建虚拟环境
-   python -m venv venv
-   
-   # 激活虚拟环境（PowerShell）
-   .\venv\Scripts\Activate.ps1
-   
-   # 或使用 Command Prompt (cmd.exe)
-   venv\Scripts\activate.bat
-   ```
-
-   **常见问题**: 如果出现执行策略错误，运行：
-   ```powershell
-   Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
-   ```
-
-2. **升级 pip 和工具**
-   ```powershell
-   python -m pip install --upgrade pip setuptools wheel
-   ```
-
-3. **安装依赖**
-   ```powershell
-   # 安装生产依赖
+   ```bash
    pip install -r requirements.txt
-   
-   # （可选）安装开发工具
-   pip install -r requirements-dev.txt
+   # 或
+   uv pip install -r requirements.txt
    ```
 
-4. **配置环境变量**
-   ```powershell
-   # 复制 .env.example 为 .env
-   Copy-Item .env.example .env
-   
-   # 编辑 .env 文件配置各项参数，或直接使用 config.toml 进行配置
-   notepad .env
+5. 复制配置模板并编辑：
+
+   ```bash
+   cp config.production.toml config.toml
+   # 编辑 config.toml，按真实环境填写
    ```
 
-5. **初始化数据库**
-   ```powershell
-   # 数据库文件会在首次运行时自动创建
+6. 给一键启动脚本执行权限：
+
+   ```bash
+   chmod +x start_backend_prod.sh
    ```
 
-### 运行应用
-
-#### 开发模式
-
-```powershell
-# 运行 API 服务器（开发）
-python main.py api --debug
-
-# 运行 Telegram Bot（如果启用）
-python main.py bot
-
-# 运行定时任务
-python main.py scheduler
-
-# 同时运行所有服务
-python main.py all
-```
-
-访问 API：`http://localhost:5000/api/v1/docs`
-
-#### 生产模式
-
-```powershell
-# 使用 Uvicorn ASGI 服务器
-pip install uvicorn
-
-# 运行应用
-uvicorn asgi:app --host 0.0.0.0 --port 5000 --workers 1
-
-# 或部署为 Windows 服务...
-```
-
-
-## Linux 安装
-
-### Ubuntu 22.04+ 安装步骤
-
-```bash
-# 安装 Python 及依赖
-sudo apt update
-sudo apt install -y python3.11 python3.11-venv python3.11-dev
-sudo apt install -y git redis-server
-
-# 克隆项目
-git clone https://github.com/Prejudice-Studio/Twilight.git
-cd Twilight
-
-# 创建虚拟环境
-python3.11 -m venv venv
-source venv/bin/activate
-
-# 安装依赖
-pip install -r requirements.txt
-
-# 配置
-cp .env.example .env
-nano .env  # 编辑配置
-
-# 测试运行
-python main.py api
-
-# 一键开发启动（后端+前端）
-bash ./start_all.sh
-```
-
-> 若 `start_all.sh` 无执行权限，请先运行 `chmod +x ./start_all.sh`。
-
-### 配置为系统服务
-
-创建 `/etc/systemd/system/twilight.service`：
-
-```ini
-[Unit]
-Description=Twilight Emby Management System
-After=network.target redis-server.service
-
-[Service]
-Type=simple
-User=twilight
-WorkingDirectory=/opt/twilight
-Environment="PATH=/opt/twilight/venv/bin"
-ExecStart=/opt/twilight/venv/bin/uvicorn asgi:app --host 0.0.0.0 --port 5000
-Restart=on-failure
-RestartSec=10
-
-[Install]
-WantedBy=multi-user.target
-```
-
-启动服务：
-```bash
-sudo systemctl daemon-reload
-sudo systemctl start twilight
-sudo systemctl enable twilight
-sudo systemctl status twilight
-```
-
-## 前端 WebUI 部署
-
-后端部署完成后，按以下步骤构建并启动前端。
-
-### 安装 Node.js 和 pnpm
-
-```bash
-# 安装 Node.js 20+（使用 NodeSource）
-curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
-sudo apt install -y nodejs
-
-# 安装 pnpm
-npm install -g pnpm
-
-# 验证
-node --version   # >= 20
-pnpm --version
-```
-
-Windows 用户可通过 `winget install OpenJS.NodeJS.LTS` 或从 https://nodejs.org 下载安装。
-
-### 构建生产版本
-
-```bash
-cd webui
-
-# 安装依赖
-pnpm install
-
-# 设置后端地址（构建时写入，必须在 build 之前设置）
-export NEXT_PUBLIC_API_URL=http://你的服务器IP:5000
-
-# 构建
-pnpm build
-```
-
-> **Windows PowerShell**：用 `$env:NEXT_PUBLIC_API_URL = "http://你的服务器IP:5000"` 替代 export。
-
-构建完成后会在 `webui/.next/` 生成优化后的生产文件，包含：
-- 代码压缩和 Tree-shaking
-- 静态页面预渲染
-- 自动代码分割（按路由懒加载）
-
-### 启动前端
-
-```bash
-# 在 webui 目录下
-pnpm start -p 3000
-```
-
-访问 `http://<服务器IP>:3000` 即可使用。
-
-### 配置为系统服务（Linux）
-
-创建 `/etc/systemd/system/twilight-webui.service`：
-
-```ini
-[Unit]
-Description=Twilight WebUI (Next.js)
-After=network.target twilight.service
-
-[Service]
-Type=simple
-User=twilight
-WorkingDirectory=/opt/twilight/webui
-Environment="NODE_ENV=production"
-Environment="NEXT_PUBLIC_API_URL=http://127.0.0.1:5000"
-Environment="PORT=3000"
-ExecStart=/usr/bin/node .next/standalone/server.js
-Restart=on-failure
-RestartSec=5
-
-[Install]
-WantedBy=multi-user.target
-```
-
-> standalone 模式下直接运行 `node .next/standalone/server.js`，无需 `node_modules`，启动更快、占用更小。
-> 需要将 `webui/.next/static` 复制到 `webui/.next/standalone/.next/static`，将 `webui/public` 复制到 `webui/.next/standalone/public`：
-> ```bash
-> cp -r .next/static .next/standalone/.next/static
-> cp -r public .next/standalone/public
-> ```
-
-启动服务：
-```bash
-sudo systemctl daemon-reload
-sudo systemctl start twilight-webui
-sudo systemctl enable twilight-webui
-```
-
-### Nginx 反向代理（推荐）
-
-使用 Nginx 统一前后端入口，启用 gzip 压缩加速访问：
-
-```nginx
-server {
-    listen 80;
-    server_name your-domain.com;
-
-    # 开启 gzip 压缩
-    gzip on;
-    gzip_types text/plain text/css application/json application/javascript text/xml;
-    gzip_min_length 1024;
-
-    # 前端
-    location / {
-        proxy_pass http://127.0.0.1:3000;
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
-    }
-
-    # 后端 API
-    location /api/ {
-        proxy_pass http://127.0.0.1:5000;
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
-    }
-
-    # 静态资源缓存
-    location /_next/static/ {
-        proxy_pass http://127.0.0.1:3000;
-        expires 365d;
-        add_header Cache-Control "public, immutable";
-    }
-
-    client_max_body_size 20M;
-}
-```
-
-通过 Nginx 统一域名后，前端 `NEXT_PUBLIC_API_URL` 可设置为同域地址（如 `http://your-domain.com`），不再需要跨域配置。
-
-## 配置说明
-
-推荐优先使用相对路径配置（如 `databases_dir = "db"`），避免跨平台迁移时路径失效。
-
-### config.toml
-
-主要配置文件，支持以下部分：
-
-```toml
-[Global]
-logging = true
-log_level = 20
-redis_url = "redis://localhost:6379/0"
-
-[API]
-host = "0.0.0.0"
-port = 5000
-debug = false
-cors_enabled = true
-cors_origins = ["http://localhost:3000", "https://example.com"]
-
-[Emby]
-emby_url = "http://127.0.0.1:8096/"
-emby_token = "your_token_here"
-
-[Telegram]
-bot_token = "your_bot_token"
-admin_id = [123456789]
-# 可选：当 Bot 与 API 不在同一网络命名空间时，指定回调目标
-bind_confirm_api_url = "http://127.0.0.1:5000"
-
-[Security]
-# Bot 调用内部绑定确认接口时使用
-bot_internal_secret = "replace_with_strong_secret"
-
-[SAR]
-register_mode = true
-user_limit = 200
-```
-
-### config.local.toml（推荐）
-
-用于放置本机私密配置（如 Token、密码、内部密钥），该文件默认已在 `.gitignore` 中。
-
-加载顺序：
-
-- `config.toml`
-- `config.local.toml`（同名键覆盖）
-- 环境变量 `TWILIGHT_*`（最高优先级）
-
-示例：
-
-```toml
-[Emby]
-emby_token = "replace_with_real_token"
-
-[Telegram]
-bot_token = "replace_with_real_bot_token"
-
-[Security]
-bot_internal_secret = "replace_with_strong_secret"
-```
-
-### 环境变量
-
-可通过 `.env` 文件或系统环境变量覆盖 `config.toml`：
-
-```bash
-# .env 文件示例
-TWILIGHT_REDIS_URL=redis://localhost:6379/0
-TWILIGHT_API_PORT=5000
-TWILIGHT_EMBY_TOKEN=your_emby_token
-```
-
-**优先级**: 环境变量 > config.toml > 默认值
-
-### Redis 配置
-
-如需使用 Redis 用于会话存储和缓存：
-
-```bash
-# Windows 上安装 Redis (使用 Docker 或 WSL)
-docker run -d -p 6379:6379 redis:latest
-
-# 配置环境变量
-TWILIGHT_REDIS_URL=redis://localhost:6379/0
-```
-
-## 故障排除
-
-### Windows 常见问题
-
-#### 1. PowerShell 执行策略错误
-
-```
-不能加载文件 ...\Activate.ps1，因为在此系统上禁止执行脚本
-```
-
-**解决**:
-```powershell
-Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
-```
-
-#### 2. Redis 连接失败
-
-如果没有安装 Redis，应用会自动回退到内存存储，但功能受限。建议：
-
-- **开发环境**: 使用 Docker Desktop 运行 Redis
-  ```powershell
-  docker run -d -p 6379:6379 redis:latest
-  ```
-
-- **生产环境**: 部署新的 Redis 实例或使用云服务
-
-#### 3. 端口占用
-
-```powershell
-# 检查端口占用情况
-netstat -ano | findstr :5000
-
-# 杀死占用进程（替换 PID）
-taskkill /PID <PID> /F
-```
-
-#### 4. Telegram 绑定失败
-
-如果出现 Telegram `/bind` 后仍无法确认绑定，优先检查：
-
-- `Security.bot_internal_secret` 是否已配置且与 Bot 侧一致
-- Bot 到 API 的回调地址是否可达（必要时设置 `Telegram.bind_confirm_api_url`）
-- 多进程部署是否已配置 `Global.redis_url`（未配置 Redis 时，跨进程绑定码可能无法共享）
-
-### Linux 常见问题
-
-#### 1. 权限不足
-
-```bash
-# 为用户添加 sudo 权限
-sudo usermod -aG sudo username
-
-# 或创建专用用户
-sudo useradd -m -s /bin/bash twilight
-```
-
-#### 2. 端口权限
-
-```bash
-# Linux 下运行 1024 以下端口需要 root
-# 建议使用 nginx 反向代理到 5000
-```
-
-## 更新和维护
-
-```powershell
-# 拉取最新代码
-git pull
-
-# 更新依赖
-pip install -r requirements.txt --upgrade
-
-# 查看已安装的包版本
-pip list
-```
-
-## 性能优化建议
-
-1. **启用 Redis**：用于会话存储和缓存
-2. **使用生产级 ASGI 服务器**：Uvicorn + Nginx
-3. **启用日志**：`TWILIGHT_LOGGING=true`
-4. **定期清理临时文件**：数据库 WAL 文件
-5. **监控资源使用**：使用 `psutil` 或系统监控工具
+7. 执行脚本启动后端。默认端口 `5000`。
+8. 在 Cloudflare 中为后端添加 DNS 记录指向你的服务器 IP，确保前端配置的 `NEXT_PUBLIC_API_URL` 与后端地址一致。
+9. 在 `config.toml` 中配置好跨源域名（`[API].cors_origins`）。
+10. 访问前端并注册账号；在 `config.toml` 中把 `[SAR].admin_uids` 改为你的账号 UID，重启后端后即成为管理员。
+
+> **注意**
+> 目前在管理后台保存配置后，程序会自行关闭并 **不会自动重启**。
+> 请配合 systemd / docker / supervisor 等具备自动拉起能力的方式启动，
+> 或等待后续版本完善。
 
 ## 获取帮助
 
 - 查看日志：`logs/twilight.log`
-- 提交 Issue：https://github.com/Prejudice-Studio/Twilight/issues
-- 参与讨论：https://github.com/Prejudice-Studio/Twilight/discussions
-- 代码仓库：https://github.com/Prejudice-Studio/Twilight
+- 提交 Issue：<https://github.com/Prejudice-Studio/Twilight/issues>
+- 参与讨论：<https://github.com/Prejudice-Studio/Twilight/discussions>
+- 代码仓库：<https://github.com/Prejudice-Studio/Twilight>

@@ -29,8 +29,25 @@ def get_primary_config_path() -> Path:
     return Path(os.environ.get("TWILIGHT_CONFIG_FILE", str(ROOT_PATH / 'config.toml')))
 
 
+def _restrict_perms(path: Path) -> None:
+    """把文件权限收紧到 0o600（仅当前用户可读写）。
+
+    Windows 下 ``os.chmod`` 只控制只读属性，效果有限；Linux 下能正确生效，
+    防止 config 备份里的 secret 被 group/other 读到。失败不抛错——某些
+    文件系统（如 FAT）不支持 chmod。
+    """
+    try:
+        os.chmod(path, 0o600)
+    except Exception as exc:  # pragma: no cover
+        logger.debug(f"chmod 600 失败（可忽略）{path}: {exc}")
+
+
 def backup_config_file(config_path: Optional[Path] = None, reason: str = 'manual') -> Optional[Path]:
-    """创建配置备份（时间戳轮转 + 兼容单文件 backup）。"""
+    """创建配置备份（时间戳轮转 + 兼容单文件 backup）。
+
+    备份文件可能包含 ``bot_token`` / ``emby_token`` 等敏感字段，写出后立刻
+    chmod 0o600，避免 ``config_backups/`` 整个目录被同机其它账号读取。
+    """
     path = Path(config_path) if config_path else get_primary_config_path()
     if not path.exists():
         return None
@@ -43,6 +60,7 @@ def backup_config_file(config_path: Optional[Path] = None, reason: str = 'manual
 
     try:
         shutil.copy2(path, rotated_backup)
+        _restrict_perms(rotated_backup)
     except Exception as err:
         logger.warning(f"创建轮转备份失败: {err}")
         return None
@@ -51,6 +69,7 @@ def backup_config_file(config_path: Optional[Path] = None, reason: str = 'manual
     legacy_backup = path.parent / f"{path.name}.backup"
     try:
         shutil.copy2(path, legacy_backup)
+        _restrict_perms(legacy_backup)
     except Exception as err:
         logger.warning(f"更新兼容备份文件失败: {err}")
 
@@ -295,10 +314,7 @@ class Config(BaseConfig):
     DATABASES_DIR: Path = ROOT_PATH / 'db'
     REDIS_URL: str = ''  # Token/缓存存储的 Redis 连接串，如 redis://localhost:6379/0
     BANGUMI_TOKEN: str = ''
-    GLOBAL_BGM_MODE: bool = False  # 是否允许BGM点格子
     TELEGRAM_MODE: bool = False
-    EMAIL_BIND: bool = False
-    FORCE_BIND_EMAIL: bool = False
     FORCE_BIND_TELEGRAM: bool = True
     # TMDB 配置
     TMDB_API_KEY: str = ''  # TMDB API Key (v3)
@@ -390,7 +406,6 @@ class APIConfig(BaseConfig):
     PORT: int = 5000
     DEBUG: bool = False
     TOKEN_EXPIRE: int = 864000  # Token 过期时间（秒）
-    API_KEY_LENGTH: int = 32
     CORS_ENABLED: bool = True
     CORS_ORIGINS: List[str] = ["*"]
     UPLOAD_FOLDER: str = str(ROOT_PATH / 'uploads')  # 文件上传目录

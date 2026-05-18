@@ -1,254 +1,228 @@
-﻿# ===================================================================
-# Twilight 生产环境配置模板
-# 复制此文件为 config.toml 并根据实际情况修改
-# 优先级: 环境变量 > config.toml > 程序默认值
-# 环境变量格式: TWILIGHT_{SECTION}_{KEY}，如 TWILIGHT_GLOBAL_SERVER_NAME
-# ===================================================================
+# ============================================================
+#  Twilight 生产环境配置模板
+#  ------------------------------------------------------------
+#  使用方法：复制此文件为 config.toml，再按真实环境修改。
+#  覆盖优先级：环境变量 > config.toml > 程序默认值。
+#  环境变量命名：TWILIGHT_{SECTION}_{KEY}，例：TWILIGHT_GLOBAL_SERVER_NAME。
+#  程序启动时会自动备份 config.toml 到 config_backups/ 目录，
+#  并把代码里新增但 toml 没有的配置项写回，无需手工补齐。
+# ============================================================
 
+# ───────── 全局 ─────────
 [Global]
-# 服务器名称，显示在前端页面标题
+# 前端站点名称（标题栏/侧边栏）
 server_name = "Twilight"
-# 服务器图标 URL（可选，留空使用默认图标）
+# 站点图标 URL，留空使用内置
 server_icon = ""
-# 是否开启日志输出
+# 是否输出运行日志
 logging = true
-# 日志等级 (10=DEBUG, 20=INFO, 30=WARNING, 40=ERROR)
+# 日志级别：10=DEBUG / 20=INFO / 30=WARNING / 40=ERROR
 log_level = 20
-# 是否打印 SQLAlchemy ORM 日志（调试时开启）
+# 是否输出 SQLAlchemy ORM 日志（极其啰嗦，调试时再开）
 sqlalchemy_log = false
-# HTTP 请求失败时最大重试次数
+# 出站 HTTP 请求失败时的最大重试次数
 max_retry = 3
-# 数据库文件存放目录（相对于项目根目录）
+# SQLite 数据库文件目录（绝对或相对路径，相对则相对项目根）
 databases_dir = "db"
-
-# Redis 连接地址（可选，用于缓存、分布式锁、Token 等）
-# 留空则使用内存实现，程序重启后缓存失效
-# 格式示例：redis://[:password@]host:port/db
+# Redis 连接串；留空使用进程内内存（重启失效，仅单进程可用）
+# 例：redis://[:password@]host:port/db
 redis_url = ""
-
-# Bangumi 相关配置
-# Bangumi 个人令牌（从 https://bgm.tv/dev/app 获取）
-bangumi_token = ""
-# 是否启用全局 Bangumi 同步功能
-global_bgm_mode = false
-# Bangumi API 地址
-bangumi_api_url = "https://api.bgm.tv"
-# Bangumi App ID（可选）
-bangumi_app_id = ""
-
-# Telegram 相关配置
-# 是否启用 Telegram Bot 模式
+# 是否启用 Telegram Bot（关闭时所有 /tg 相关功能直接拒绝）
 telegram_mode = false
-# 是否强制绑定 Telegram（开启后注册时必须提供 telegram_id）
+# 是否强制所有用户绑定 Telegram 才能登录/注册
 force_bind_telegram = false
-
-# 邮箱绑定相关配置
-# 是否启用邮箱绑定功能
-email_bind = false
-# 是否强制绑定邮箱
-force_bind_email = false
-
-# TMDB 相关配置
-# TMDB API Key v3（从 https://www.themoviedb.org/settings/api 获取）
+# Bangumi 个人 token（https://bgm.tv/dev/app）；留空则不调用 BGM
+bangumi_token = ""
+# Bangumi API 地址（自建反代时可改）
+bangumi_api_url = "https://api.bgm.tv"
+# Bangumi App ID（OAuth，可选）
+bangumi_app_id = ""
+# TMDB API Key v3（https://www.themoviedb.org/settings/api）
 tmdb_api_key = ""
-# TMDB API 地址（可替换国内镜像）
+# TMDB API 地址（如有镜像可改）
 tmdb_api_url = "https://api.themoviedb.org/3"
-# TMDB 图片 CDN 地址
+# TMDB 图片 CDN
 tmdb_image_url = "https://image.tmdb.org/t/p"
 
-# ===================================================================
+# ───────── Emby ─────────
 [Emby]
-# ===================================================================
-# Emby/Jellyfin 服务器地址（后端用于连接）
-# Docker 部署时请按实际网络环境配置地址
+# Emby/Jellyfin 服务器地址（后端访问，跟前端用户访问的可以不同）
 emby_url = "http://127.0.0.1:8096/"
-# Emby API Token（管理面板 → 高级 → API 密钥）
+# Emby API Token（管理后台 → 高级 → API 密钥）
 emby_token = ""
-# 管理员用户名（API Token 不可用时备用）
+# 备用：API Token 失效时用用户名/密码鉴权
 emby_username = ""
-# 管理员密码（API Token 不可用时备用）
 emby_password = ""
-# 前端展示的 Emby 访问线路列表，格式为 "名称 : 地址"
+# 普通用户可见的播放线路：格式 "名称 : URL"
 emby_url_list = [
   "直连 : http://your-server:8096/",
 ]
-# 白名单用户专用线路列表
+# 白名单 / 管理员专属线路
 emby_url_list_for_whitelist = [
   "直连 : http://your-server:8096/",
 ]
 
-# ===================================================================
+# ───────── Telegram Bot ─────────
 [Telegram]
-# ===================================================================
-# Telegram Bot API 基础地址
+# Telegram Bot API 基础地址（私有部署时可改，比如 https://my-tg-proxy/bot）
 telegram_api_url = "https://api.telegram.org/bot"
-# Bot Token
+# Bot Token（@BotFather）
 bot_token = ""
-# 管理员 Telegram ID 列表
+# 管理员 Telegram ID 列表（数字）；Bot 内 /admin 命令仅向这些 ID 开放
 admin_id = []
-# 群组 ID 或 @用户名 列表
+# 群组列表：可填数字 ID（如 -1001234567890）或 @用户名
 group_id = []
-# 频道 ID 或 @用户名 列表
+# 频道列表：同上
 channel_id = []
-# 是否要求用户加入群组/频道后才能使用系统
+# 是否强制订阅指定群/频道才能使用（按 Bot 校验）
 force_subscribe = false
-# 是否启用 TG Bot 面板功能
+# 是否启用完整内联面板（关闭后仅保留 /help /bind /me）
 enable_tg_panel = false
-# Telegram 代理地址（可选）
+# 强制要求绑定/已绑定用户保持在群组内；退群会被自动禁用并同步 Emby
+require_group_membership = false
+# 上面开启时的定时巡检间隔（分钟）
+group_check_interval_minutes = 30
+# Bot 出站代理（如 http://127.0.0.1:7890 / socks5://127.0.0.1:1080）
 proxy_url = ""
+# Bot 绑定确认回调（可填完整接口或后端基址；留空走默认）
+bind_confirm_api_url = ""
 
-# ===================================================================
+# ───────── 注册 / 用户策略 ─────────
 [SAR]
-# ===================================================================
-# 是否允许注册
-register_mode = true
-# 是否仅允许使用注册码注册
+# 是否开放注册；首次部署强烈建议保持 false，后台开管理员后再放开
+register_mode = false
+# 是否强制必须使用注册码
 register_code_limit = false
-# 最大注册用户数量，-1 表示不限制
+# 最大已注册用户数；超过后停止接收新注册
 user_limit = 200
-
-# ---- 无码注册（待激活） ----
-# 是否允许无码注册
+# 每用户最多同时存在的求片数（待处理 + 下载中），-1 不限
+max_concurrent_requests_per_user = -1
+# 是否允许无码注册（无注册码也能建系统账号；Emby 仍需事后补建）
 allow_pending_register = true
-# 是否允许无 Emby 账户用户查看部分内容
+# 无 Emby 账户的用户是否可查看部分页面（公告、签到等）
 allow_no_emby_view = true
 
-# ---- Emby 自由注册 ----
-# 是否开启 Emby 自由注册
+# —— Emby 自由注册（队列）
 emby_direct_register_enabled = false
-# Emby 自由注册默认开通天数
 emby_direct_register_days = 30
-# Emby 自由注册队列 worker 数
 emby_direct_register_workers = 8
-# Emby 自由注册队列最大排队数
 emby_direct_register_max_queue = 1000
-# 注册完成状态保留时长（秒）
 emby_direct_register_status_ttl = 1800
 
-# ---- 管理员 / 白名单 ----
-admin_uids = "1"
+# —— 管理员 / 白名单（优先 UID，逗号分隔）
+# ⚠ 请改成你的真实 UID；空字符串表示"无管理员"
+admin_uids = ""
 admin_usernames = ""
 white_list_uids = ""
 white_list_usernames = ""
 
-# ---- 邀请系统 ----
+# —— 邀请树（已绑定 Emby 的用户可向下邀请；A 邀 B 邀 C 计 3 层）
 invite_enabled = false
 invite_limit = 10
+invite_max_depth = 3
+invite_require_emby = true
+invite_code_default_days = 30
 
-# ---- 无 Emby 账户用户清理 ----
+# —— 长期无 Emby 的悬空用户自动清理
 auto_cleanup_no_emby = false
 auto_cleanup_no_emby_days = 7
 
-# ===================================================================
+# ───────── 设备 / 并发流限制 ─────────
 [DeviceLimit]
-# ===================================================================
-# 是否启用设备限制
 device_limit_enabled = false
-# 单用户最大允许设备数
 max_devices = 5
-# 单用户最大同时播放流数
 max_streams = 2
-# 超出限制时是否踢掉最早会话
+# 超限时是否自动踢最早的会话
 kick_oldest_session = false
 
-# ===================================================================
+# ───────── API 服务器 ─────────
 [API]
-# ===================================================================
-# 监听地址（0.0.0.0 = 所有网卡）
+# 监听地址；0.0.0.0 = 所有网卡
 host = "0.0.0.0"
-# 监听端口
 port = 5000
-# 调试模式（生产环境必须为 false）
+# 生产请保持 false；开启 debug 会回显堆栈、自动重载
 debug = false
-# JWT Token 过期时间（秒，默认 10 天）
+# 登录 Token 有效期（秒）；默认 10 天
 token_expire = 864000
-# API Key 长度
-api_key_length = 32
-# 是否启用 CORS 跨域
+# 是否启用 CORS
 cors_enabled = true
-# 允许的跨域来源（生产环境建议配置为前端域名白名单）
-cors_origins = ["*"]
-# 文件上传目录（相对于项目根目录或绝对路径）
+# ⚠ CORS 白名单：含 "*" 时浏览器禁用 Cookie（登录会失败）。
+# 生产请显式列出前端域名，例：["https://app.example.com"]
+cors_origins = []
+# 文件上传目录（绝对路径或相对项目根目录），留空使用默认 uploads/
 # upload_folder = "uploads"
-# 最大上传文件大小（字节，默认 5MB）
+# 单文件上传字节上限（默认 5 MiB）
 # max_upload_size = 5242880
-# 会话 Cookie 配置
+# —— 会话 Cookie ——
 session_cookie_name = "twilight_session"
+# 生产必须 true；HTTP 调试再临时关闭
 session_cookie_secure = true
+# 同站部署 Strict；前后端跨域必须 None（同时 secure=true）
 session_cookie_samesite = "Strict"
+# 留空用请求 Host；跨子域共享会话填顶级域 .example.com
 session_cookie_domain = ""
 session_cookie_path = "/"
 
-# ===================================================================
+# ───────── 安全 ─────────
 [Security]
-# ===================================================================
-# 连续登录失败多少次后锁定
+# 同一 IP 连续登录失败多少次后锁定
 login_fail_threshold = 5
-# 锁定时长（分钟）
+# 锁定时长（分钟），影响登录限流窗口
 lockout_minutes = 30
-# 是否允许仅凭 telegram_id 直接登录（生产建议关闭）
+# 仅凭 telegram_id 直登（高风险，生产保持 false）
 telegram_direct_login_enabled = false
-# 是否允许通过 API Key 直接换取完整会话 token（生产建议关闭）
+# 通过 API Key 直接换取 Web 会话 Token（高风险，生产保持 false）
 apikey_direct_login_enabled = false
-# Bot 调用内部接口密钥（必填，需使用高强度随机字符串）
+# Bot/外部系统调用内部接口的共享密钥；必须高熵随机字符串
+# 生成示例：python -c "import secrets; print(secrets.token_urlsafe(48))"
 bot_internal_secret = ""
 
-# ===================================================================
+# ───────── 定时任务 ─────────
 [Scheduler]
-# ===================================================================
-# 时区
 timezone = "Asia/Shanghai"
-# 是否启用定时任务
 enabled = true
-# 过期用户清理时间（HH:MM）
+# 过期用户清理（HH:MM）
 expired_check_time = "03:00"
-# 即将过期提醒时间
+# 即将过期提醒
 expiring_check_time = "09:00"
-# 每日统计生成时间
+# 每日统计汇总
 daily_stats_time = "00:05"
 # 会话清理间隔（小时）
 session_cleanup_interval = 6
 # Emby 用户同步间隔（小时）
 emby_sync_interval = 6
 
-# ===================================================================
+# ───────── 通知 ─────────
 [Notification]
-# ===================================================================
-# 是否启用通知服务
 enabled = true
-# 到期前几天发送提醒
+# 到期前几天提醒
 expiry_remind_days = 3
-# 新媒体入库是否通知
+# 新媒体入库是否广播
 new_media_notify = false
 
-# ===================================================================
+# ───────── Bangumi 同步 ─────────
 [BangumiSync]
-# ===================================================================
-# 是否启用 Bangumi 同步（Emby 看完自动在 BGM 标记进度）
+# 开启后看完 Emby 自动在 BGM 标记进度（依赖 [Global].bangumi_token 或用户自配）
 enabled = false
-# 同步时自动添加到收藏（标记为"在看"）
 auto_add_collection = true
-# 观看记录设为私密
 private_collection = true
-# 屏蔽关键词（包含这些词的番剧不同步）
+# 命中关键词的条目不同步
 block_keywords = []
-# 最低播放进度百分比（达到才算看完）
+# 播放进度达到多少 % 才算"看完"
 min_progress_percent = 80
 
-# ===================================================================
+# ───────── 签到 / 积分 ─────────
 [Signin]
-# ===================================================================
-# 是否启用签到与积分系统（仅装饰用途，不影响权限）
+# 仅装饰用途，无排行榜
 enabled = true
-# 货币展示名（如 星币 / 金币 / 云币）
+# 展示用货币名（如 星币 / 金币 / 云币）
 currency_name = "星币"
-# 每日签到获得积分的随机范围
+# 每日签到积分随机范围
 daily_min = 5
 daily_max = 20
-# 连签加成总开关：关闭后只发放每日奖励，连签天数仍记录但不再额外赠送积分
+# 连签加成总开关（关闭后只发每日奖励）
 streak_bonus_enabled = true
-# 连签加成：到达指定连签天数额外奖励对应积分（仅在 streak_bonus_enabled=true 时生效）
-# 两个列表一一对应，长度需一致
+# 连签 N 天 → 额外奖励 M；两数组一一对应
 streak_bonus_days = [3, 7, 14, 30]
 streak_bonus_points = [10, 50, 100, 300]
 # 漏签是否清零连签天数

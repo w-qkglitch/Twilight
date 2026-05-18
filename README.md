@@ -8,6 +8,8 @@
 
 **该项目绝大部分由 Claude Code Opus 4.6/4.7 与 ChatGPT Codex 5.3 完成，仅有少量人工修改和润色。主贡献者对该项目安全性等不做任何保证，使用前请务必仔细审查代码。如出现问题，本项目不会承担任何责任。请了解以上信息后再决定是否使用。**
 
+**主开发者被某些苹果设备用户的行为恶心到了，前端不会解决任何有关Apple系的问题且任何使用苹果设备反馈的问题都不会得到回复且会被视为完全无效，苹果用户很高贵，就是比安卓用户有钱还愿意啥都买，只有付费才是好的，本项目完全开源不收费，是入不了你们眼的。**
+
 [![Python](https://img.shields.io/badge/Python-3.10+-blue?logo=python&logoColor=white)](https://www.python.org/) [![Flask](https://img.shields.io/badge/Flask-3.x-green?logo=flask&logoColor=white)](https://flask.palletsprojects.com/) [![Next.js](https://img.shields.io/badge/Next.js-16.0+-black?logo=next.js&logoColor=white)](https://nextjs.org/) [![SQLite](https://img.shields.io/badge/SQLite-3-blue?logo=sqlite&logoColor=white)](https://www.sqlite.org/) [![License](https://img.shields.io/badge/License-MIT-yellow)](LICENSE)
 
 </div>
@@ -27,7 +29,7 @@
 
 ---
 
-## 🚀 快速开始
+## 🚀 安装部署
 
 > 详细步骤请参考 **[安装部署指南](docs/INSTALL.md)**
 
@@ -36,65 +38,6 @@
 - **Python** 3.10+（推荐 3.11+）
 - **Node.js** 18+（用于前端，推荐 20+）
 - **Emby/Jellyfin** 已部署的服务器
-
-### 安装 & 启动
-
-```bash
-# 克隆项目
-git clone https://github.com/Prejudice-Studio/Twilight.git
-cd Twilight
-
-# 创建虚拟环境并安装依赖
-python -m venv venv
-# Windows: .\venv\Scripts\Activate.ps1
-# Linux/macOS: source venv/bin/activate
-pip install -r requirements.txt
-
-# 编辑配置（至少填写 Emby 地址和 Token）
-# 参考 config.production.toml 获取完整配置项
-nano config.toml  # 或 notepad config.toml
-# 建议把密钥放到 config.local.toml（git 已忽略）
-
-# 启动后端
-python main.py api
-```
-
-### 启动模式
-
-```bash
-python main.py api          # 仅 API 服务
-python main.py bot          # 仅 Telegram Bot
-python main.py scheduler    # 仅定时任务
-python main.py all          # 全部启动
-
-# 生产环境
-uvicorn asgi:app --host 0.0.0.0 --port 5000 --workers 1
-
-# 生产脚本（后端 + 可选 Bot）
-TWILIGHT_WITH_BOT=1 bash ./start_backend_prod.sh
-```
-
-### 前端（可选）
-
-```bash
-cd webui && pnpm install && pnpm dev
-# 访问 http://localhost:3000
-```
-
-### 一键启动（开发）
-
-```bash
-# Windows
-start_all.bat
-
-# Linux/macOS
-bash ./start_all.sh
-```
-
-### 首次使用
-
-1. 在 `config.toml` 中配置 Emby 地址、Token，以及管理员用户名
-2. 启动服务后访问 Web 界面注册管理员账号
 
 ---
 

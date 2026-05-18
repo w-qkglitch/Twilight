@@ -640,6 +640,8 @@ async def get_config_schema():
                     {'key': 'bangumi_api_url', 'label': 'Bangumi API 地址', 'type': 'string', 'description': 'Bangumi API 服务器地址', 'value': Config.BANGUMI_API_URL},
                     {'key': 'bangumi_app_id', 'label': 'Bangumi App ID', 'type': 'string', 'description': 'Bangumi OAuth App ID（可选）', 'value': Config.BANGUMI_APP_ID},
                 ],
+                # 已删除字段（数据上仍可能存在历史值，但不再向 UI 暴露）：
+                # global_bgm_mode / email_bind / force_bind_email
             },
             {
                 'key': 'Emby',
@@ -718,10 +720,17 @@ async def get_config_schema():
                     {'key': 'port', 'label': '端口', 'type': 'int', 'description': 'API 服务器监听端口', 'value': APIConfig.PORT},
                     {'key': 'debug', 'label': '调试模式', 'type': 'bool', 'description': '是否开启调试模式（生产环境请关闭）', 'value': APIConfig.DEBUG},
                     {'key': 'token_expire', 'label': 'Token 有效期', 'type': 'int', 'description': '用户登录 Token 有效期（秒）', 'value': APIConfig.TOKEN_EXPIRE},
-                    {'key': 'api_key_length', 'label': 'API Key 长度', 'type': 'int', 'description': '生成的 API Key 字符长度', 'value': APIConfig.API_KEY_LENGTH},
                     {'key': 'cors_enabled', 'label': '启用 CORS', 'type': 'bool', 'description': '是否允许跨域请求', 'value': APIConfig.CORS_ENABLED},
-                    {'key': 'cors_origins', 'label': 'CORS 白名单', 'type': 'list', 'description': '允许跨域请求的源地址列表，留空则允许所有', 'value': APIConfig.CORS_ORIGINS},
+                    {'key': 'cors_origins', 'label': 'CORS 白名单', 'type': 'list', 'description': '允许跨域请求的源地址列表；含 "*" 时浏览器禁用 Cookie（无法登录），生产请显式填前端域名', 'value': APIConfig.CORS_ORIGINS},
+                    {'key': 'upload_folder', 'label': '上传目录', 'type': 'string', 'description': '文件上传目录（绝对路径或相对项目根目录）', 'value': APIConfig.UPLOAD_FOLDER},
+                    {'key': 'max_upload_size', 'label': '最大上传大小（字节）', 'type': 'int', 'description': '单文件上传字节上限，默认 5 MiB', 'value': APIConfig.MAX_UPLOAD_SIZE},
+                    {'key': 'session_cookie_name', 'label': '会话 Cookie 名', 'type': 'string', 'description': '保存登录会话的 Cookie 名称', 'value': APIConfig.SESSION_COOKIE_NAME},
+                    {'key': 'session_cookie_secure', 'label': 'Cookie 仅 HTTPS', 'type': 'bool', 'description': '生产强烈建议开启；HTTP 调试时关闭', 'value': APIConfig.SESSION_COOKIE_SECURE},
+                    {'key': 'session_cookie_samesite', 'label': 'Cookie SameSite', 'type': 'select', 'description': 'Strict 最严格；前后端跨域部署需要 None（同时 secure=true）', 'value': APIConfig.SESSION_COOKIE_SAMESITE, 'options': [{'label': 'Strict', 'value': 'Strict'}, {'label': 'Lax', 'value': 'Lax'}, {'label': 'None', 'value': 'None'}]},
+                    {'key': 'session_cookie_domain', 'label': 'Cookie 域', 'type': 'string', 'description': '为空使用请求 Host；跨子域共享会话时填顶级域，如 .example.com', 'value': APIConfig.SESSION_COOKIE_DOMAIN},
+                    {'key': 'session_cookie_path', 'label': 'Cookie 路径', 'type': 'string', 'description': '默认 / 即可', 'value': APIConfig.SESSION_COOKIE_PATH},
                 ],
+                # 已删除字段：api_key_length（apikey 模块用固定长度生成）
             },
             {
                 'key': 'Security',

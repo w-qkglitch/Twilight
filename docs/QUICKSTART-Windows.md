@@ -139,14 +139,14 @@ python main.py api --port 8080
 
 ## 下一步
 
-- 📚 阅读 [完整安装指南](docs/INSTALL.md)
-- 🔧 查看 [开发指南](docs/DEVELOPMENT.md)
-- 🌐 浏览 [API 文档](docs/BACKEND_API.md)
-- 💻 前往 [前端开发](webui/README.md)
+- 📚 阅读 [完整安装指南](./INSTALL.md)
+- 🔧 查看 [开发指南](./DEVELOPMENT.md)
+- 🌐 浏览 [API 文档](./BACKEND_API.md)
+- 💻 前往 [前端开发](../webui/README.md)
 
 ## 获取帮助
 
-- 📖 [项目文档](docs/)
+- 📖 [项目文档](./README.md)
 - 🐛 [提交 Issue](https://github.com/Prejudice-Studio/Twilight/issues)
 - 💬 [讨论](https://github.com/Prejudice-Studio/Twilight/discussions)
 
