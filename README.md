@@ -8,8 +8,6 @@
 
 **该项目绝大部分由 Claude Code Opus 4.6/4.7 与 ChatGPT Codex 5.3 完成，仅有少量人工修改和润色。主贡献者对该项目安全性等不做任何保证，使用前请务必仔细审查代码。如出现问题，本项目不会承担任何责任。请了解以上信息后再决定是否使用。**
 
-**主开发者被某些苹果设备用户的行为恶心到了，前端不会解决任何有关Apple系的问题且任何使用苹果设备反馈的问题都不会得到回复且会被视为完全无效，苹果用户很高贵，就是比安卓用户有钱还愿意啥都买，只有付费才是好的，本项目完全开源不收费，是入不了你们眼的。**
-
 [![Python](https://img.shields.io/badge/Python-3.10+-blue?logo=python&logoColor=white)](https://www.python.org/) [![Flask](https://img.shields.io/badge/Flask-3.x-green?logo=flask&logoColor=white)](https://flask.palletsprojects.com/) [![Next.js](https://img.shields.io/badge/Next.js-16.0+-black?logo=next.js&logoColor=white)](https://nextjs.org/) [![SQLite](https://img.shields.io/badge/SQLite-3-blue?logo=sqlite&logoColor=white)](https://www.sqlite.org/) [![License](https://img.shields.io/badge/License-MIT-yellow)](LICENSE)
 
 </div>
