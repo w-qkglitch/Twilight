@@ -130,6 +130,9 @@ class EmbyRegisterQueueService:
 
         # 先做一次无锁快速检查，降低高并发下全局状态锁竞争。
         current_count = await UserService.get_registered_user_count()
+        emby_bound_count = await UserService.get_emby_bound_user_count()
+        emby_limit = UserService.get_emby_user_limit()
+
         existing_tg = await UserOperate.get_user_by_telegram_id(telegram_id)
         if existing_tg and existing_tg.EMBYID:
             return None, "该 Telegram 账号已绑定 Emby 账户"
@@ -139,6 +142,10 @@ class EmbyRegisterQueueService:
             return None, "该用户名已被占用"
         if existing_name and existing_name.TELEGRAM_ID and existing_name.TELEGRAM_ID != telegram_id:
             return None, "该用户名已被占用"
+
+        # Emby 绑定上限：入队前快速拒绝，避免 worker 跑到一半才发现额度满
+        if emby_limit > 0 and emby_bound_count >= emby_limit:
+            return None, f"Emby 已绑定用户数已达上限（{emby_bound_count}/{emby_limit}）"
 
         async with cls._state_lock:
             await cls._cleanup_expired_status_locked()
@@ -164,6 +171,10 @@ class EmbyRegisterQueueService:
             pending_count = len(cls._pending_by_username)
             if current_count + pending_count >= RegisterConfig.USER_LIMIT:
                 return None, f"已达到用户数量上限 ({RegisterConfig.USER_LIMIT})"
+
+            # Emby 绑定上限：把排队中的人也算进去，避免一次性放过太多导致 worker 集体 USER_LIMIT_REACHED
+            if emby_limit > 0 and (emby_bound_count + pending_count) >= emby_limit:
+                return None, f"Emby 已绑定用户数已达上限（{emby_bound_count + pending_count}/{emby_limit}）"
 
             request_id = f"erq_{secrets.token_hex(8)}"
             status_token = secrets.token_urlsafe(20)

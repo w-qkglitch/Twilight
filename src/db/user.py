@@ -389,6 +389,11 @@ class UserOperate:
         return hashlib.sha256(apikey.encode('utf-8')).hexdigest()
 
     @staticmethod
+    def _escape_like_pattern(value: str) -> str:
+        """转义 SQL LIKE 模式字符，避免 %/_ 被当作通配符。"""
+        return value.replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_')
+
+    @staticmethod
     async def get_new_uid() -> int:
         """生成一个新的UID"""
         async with UsersSessionFactory() as session:
@@ -508,6 +513,9 @@ class UserOperate:
         if user.EXPIRED_AT == -1:
             # 永不过期，无需续期
             return
+        if user.EXPIRED_AT == 0:
+            # 待开通（未绑定 Emby），不应被续期 —— 走到这里多半是上层未做拦截
+            return
 
         async with UsersSessionFactory() as session:
             async with session.begin():
@@ -546,6 +554,18 @@ class UserOperate:
                     UserModel.ROLE != Role.ADMIN.value,
                     UserModel.ACTIVE_STATUS == True,
                     UserModel.EXPIRED_AT > int(time.time())
+                )
+            )
+            return result.scalar_one()
+
+    @staticmethod
+    async def get_emby_bound_users_count() -> int:
+        """获取当前已绑定 Emby 的用户数量（EMBYID 非空）。"""
+        async with UsersSessionFactory() as session:
+            result = await session.execute(
+                select(func.count()).select_from(UserModel).where(
+                    UserModel.EMBYID.is_not(None),
+                    UserModel.EMBYID != ''
                 )
             )
             return result.scalar_one()
@@ -606,16 +626,17 @@ class UserOperate:
     async def get_expired_users() -> list[UserModel]:
         """
         获取所有已过期但仍处于启用状态的用户
-        排除永不过期(-1)的用户
+        排除永不过期(-1)与待开通(0)的用户
         """
         current_time = int(time.time())
         async with UsersSessionFactory() as session:
             result = await session.execute(
                 select(UserModel).where(
-                    UserModel.EXPIRED_AT != -1,  # 排除永不过期
+                    UserModel.EXPIRED_AT != -1,   # 排除永不过期
+                    UserModel.EXPIRED_AT > 0,     # 排除待开通 sentinel
                     UserModel.EXPIRED_AT < current_time,  # 已过期
                     UserModel.ACTIVE_STATUS == True,  # 仍然启用
-                    UserModel.EMBYID != '',  # 有 Emby 账户
+                    UserModel.EMBYID != '',       # 有 Emby 账户
                     UserModel.EMBYID.isnot(None),
                 )
             )
@@ -625,7 +646,7 @@ class UserOperate:
     async def get_expiring_users(days: int = 3) -> list[UserModel]:
         """
         获取即将过期的用户（用于提醒通知）
-        
+
         :param days: 几天内过期
         """
         current_time = int(time.time())
@@ -634,9 +655,12 @@ class UserOperate:
             result = await session.execute(
                 select(UserModel).where(
                     UserModel.EXPIRED_AT != -1,
+                    UserModel.EXPIRED_AT > 0,  # 排除待开通 sentinel
                     UserModel.EXPIRED_AT > current_time,  # 还未过期
                     UserModel.EXPIRED_AT <= expire_threshold,  # 但即将过期
                     UserModel.ACTIVE_STATUS == True,
+                    UserModel.EMBYID != '',       # 没绑 Emby 也跳过
+                    UserModel.EMBYID.isnot(None),
                 )
             )
             return list(result.scalars().all())
@@ -707,8 +731,9 @@ class UserOperate:
                     _or_emby(UserModel.EMBYID.is_(None), UserModel.EMBYID == '')
                 )
             if search:
-                like = f"%{search}%"
-                or_clauses = [UserModel.USERNAME.ilike(like)]
+                escaped = UserOperate._escape_like_pattern(search)
+                like = f"%{escaped}%"
+                or_clauses = [UserModel.USERNAME.ilike(like, escape='\\')]
                 if search.isdigit():
                     try:
                         as_int = int(search)
@@ -786,3 +811,66 @@ class UserOperate:
                     update(UserModel).where(UserModel.UID.in_(uids)).values(ACTIVE_STATUS=False)
                 )
                 return result.rowcount
+
+    @staticmethod
+    async def list_uids_for_bulk_expire(
+        *,
+        include_admin: bool = False,
+        include_whitelist: bool = False,
+        only_with_emby: bool = True,
+        only_active: bool = True,
+    ) -> list[int]:
+        """
+        枚举批量到期调控的目标 UID 列表。
+
+        默认排除：管理员、白名单、待开通 Emby、已禁用账号；只返回普通用户。
+        调用方需要自行确认目标集合，避免误伤。
+        """
+        async with UsersSessionFactory() as session:
+            conditions = []
+            roles_to_exclude: list[int] = []
+            if not include_admin:
+                roles_to_exclude.append(Role.ADMIN.value)
+            if not include_whitelist:
+                roles_to_exclude.append(Role.WHITE_LIST.value)
+            # 永远排除未识别角色（理论上不会有 EMBYID，但保险起见）
+            roles_to_exclude.append(Role.UNRECOGNIZED.value)
+            if roles_to_exclude:
+                conditions.append(~UserModel.ROLE.in_(roles_to_exclude))
+            if only_with_emby:
+                conditions.append(UserModel.EMBYID.isnot(None))
+                conditions.append(UserModel.EMBYID != '')
+            if only_active:
+                conditions.append(UserModel.ACTIVE_STATUS == True)
+
+            query = select(UserModel.UID)
+            if conditions:
+                query = query.where(*conditions)
+            result = await session.execute(query)
+            return [int(row[0]) for row in result.all()]
+
+    @staticmethod
+    async def batch_set_expired_at(uids: list[int], expired_at: int) -> int:
+        """
+        批量设置 EXPIRED_AT。
+
+        :param uids: 目标 UID 列表，调用方负责筛选/排除管理员等。
+        :param expired_at: 目标到期时间戳；``-1`` 永久，``> 0`` 指定时刻。
+                            ``0`` 不允许（避免误把已开通账号打回"未开通"）。
+        :return: 实际更新行数。
+        """
+        if not uids:
+            return 0
+        if expired_at == 0:
+            raise ValueError("expired_at=0 仅用于待开通 Emby 账号，禁止通过批量接口设置")
+        if expired_at != -1 and expired_at <= 0:
+            raise ValueError("expired_at 必须 > 0 或为 -1（永久）")
+
+        async with UsersSessionFactory() as session:
+            async with session.begin():
+                result = await session.execute(
+                    update(UserModel)
+                    .where(UserModel.UID.in_(uids))
+                    .values(EXPIRED_AT=expired_at)
+                )
+                return int(result.rowcount or 0)

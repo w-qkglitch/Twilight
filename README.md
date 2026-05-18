@@ -2,17 +2,22 @@
 
 # Twilight 暮光
 
-## Next Generation Emby/Jellyfin Manager
+## New Generation Emby/Jellyfin Manager
 
-## !!须知!!
+## 新一代 Emby/Jellyfin 用户管理器
 
-**该项目绝大部分由 Claude Code Opus 4.6/4.7 与 ChatGPT Codex 5.3 完成，仅有少量人工修改和润色。主贡献者对该项目安全性等不做任何保证，使用前请务必仔细审查代码。如出现问题，本项目不会承担任何责任。请了解以上信息后再决定是否使用。**
+# !!须知!!
+
+## **!!该项目绝大部分由 Claude Code Opus 4.6/4.7 与 ChatGPT Codex 5.3 完成，仅有少量人工修改和润色。主贡献者对该项目安全性等不做任何保证，使用前请务必仔细审查代码。如出现问题，本项目不会承担任何责任。请了解以上信息后再决定是否使用。!!**
 
 [![Python](https://img.shields.io/badge/Python-3.10+-blue?logo=python&logoColor=white)](https://www.python.org/) [![Flask](https://img.shields.io/badge/Flask-3.x-green?logo=flask&logoColor=white)](https://flask.palletsprojects.com/) [![Next.js](https://img.shields.io/badge/Next.js-16.0+-black?logo=next.js&logoColor=white)](https://nextjs.org/) [![SQLite](https://img.shields.io/badge/SQLite-3-blue?logo=sqlite&logoColor=white)](https://www.sqlite.org/) [![License](https://img.shields.io/badge/License-MIT-yellow)](LICENSE)
 
 </div>
 
 ---
+
+- 主贡献者默认你具备一定的 Linux 与 Python 基础。如果完全不熟悉，建议先了解相关基础
+- **关于 Docker** 作者本人不喜欢 Docker，因此 **不提供** Docker 部署方案。如果你需要 Docker，请自行实现；请勿将"没有 Docker 方案"作为 Issue 提交，否则会被直接关闭。
 
 ## ✨ 功能特性
 

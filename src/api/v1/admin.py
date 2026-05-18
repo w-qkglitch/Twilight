@@ -1639,6 +1639,201 @@ async def delete_unlinked_emby_users():
     })
 
 
+# ==================== 批量到期时间调控 ====================
+
+
+@admin_bp.route('/users/bulk-expire', methods=['POST'])
+@require_auth
+@require_admin
+async def admin_bulk_set_expire():
+    """一键批量调控用户到期时间（管理员）。
+
+    Body:
+        {
+            "expired_at": -1,                 // -1 永久；> 0 unix 时间戳（秒）
+            "days": 30,                       // 与 expired_at 二选一；正数 = 从现在起 N 天，
+                                              //   0/负 视为永久 (= expired_at=-1)
+            "filter": {                       // 默认空：覆盖"全部可见用户(普通用户)"
+                "role": 1,                    //   选填，对应 Role 枚举值
+                "active": true,
+                "emby": "bound"               //   "bound" / "unbound"
+            },
+            "include_admin": false,           // 默认 false，谨防误伤
+            "include_whitelist": false,
+            "include_pending_emby": false,    // 默认 false：跳过未绑定 Emby 的账号
+            "confirm": "BULK_EXPIRE_OK"       // 必填，强制确认串
+        }
+
+    Response data:
+        {
+            "matched": <int>, "updated": <int>,
+            "expired_at": -1 | <ts>,
+            "skipped_pending_emby": <int>,
+            "skipped_admins": <int>, "skipped_whitelist": <int>
+        }
+    """
+    from src.core.utils import (
+        days_to_seconds, rate_limit_check, timestamp,
+    )
+
+    data = request.get_json(silent=True) or {}
+    confirm = (data.get('confirm') or '').strip()
+    if confirm != 'BULK_EXPIRE_OK':
+        return api_response(False, "需要提供 confirm=\"BULK_EXPIRE_OK\" 以确认本次批量操作", code=400)
+
+    # 解析目标到期时间
+    expired_at_raw = data.get('expired_at')
+    days_raw = data.get('days')
+    expired_at: int
+    if expired_at_raw is not None:
+        try:
+            expired_at = int(expired_at_raw)
+        except (TypeError, ValueError):
+            return api_response(False, "expired_at 必须是整数", code=400)
+    elif days_raw is not None:
+        try:
+            days = int(days_raw)
+        except (TypeError, ValueError):
+            return api_response(False, "days 必须是整数", code=400)
+        if days <= 0:
+            expired_at = -1
+        else:
+            if days > 365 * 100:
+                return api_response(False, "days 过大，请直接选择永久", code=400)
+            expired_at = timestamp() + days_to_seconds(days)
+    else:
+        return api_response(False, "必须提供 expired_at 或 days 之一", code=400)
+
+    if expired_at == 0:
+        return api_response(False, "expired_at=0 是未开通 sentinel，禁止通过批量接口设置", code=400)
+    if expired_at != -1 and expired_at <= 0:
+        return api_response(False, "expired_at 必须 > 0 或 = -1", code=400)
+    # 上限：不能比 9999-12-31 还远
+    if expired_at != -1 and expired_at > 253402214400:
+        return api_response(False, "expired_at 超出允许范围", code=400)
+
+    # 操作员速率限制：5 分钟内最多 3 次（防误连点）
+    allowed, retry_after = rate_limit_check(
+        "admin_bulk_expire", str(g.current_user.UID),
+        max_requests=3, window_seconds=300,
+    )
+    if not allowed:
+        return api_response(
+            False,
+            f"批量到期操作过于频繁，请 {retry_after} 秒后再试",
+            code=429,
+        )
+
+    include_admin = bool(data.get('include_admin', False))
+    include_whitelist = bool(data.get('include_whitelist', False))
+    include_pending_emby = bool(data.get('include_pending_emby', False))
+
+    filt = data.get('filter') or {}
+    if not isinstance(filt, dict):
+        return api_response(False, "filter 必须是对象", code=400)
+
+    role_filter = filt.get('role')
+    active_filter = filt.get('active')
+    emby_filter = (filt.get('emby') or '').strip().lower()
+
+    # 角色过滤合法性
+    if role_filter is not None:
+        try:
+            role_filter = int(role_filter)
+        except (TypeError, ValueError):
+            return api_response(False, "filter.role 必须是整数", code=400)
+        if role_filter not in [r.value for r in Role]:
+            return api_response(False, "filter.role 非法", code=400)
+
+    # 拉一遍全部满足条件的用户
+    has_emby_flag: bool | None = None
+    if emby_filter == 'bound':
+        has_emby_flag = True
+    elif emby_filter == 'unbound':
+        has_emby_flag = False
+
+    all_matching, _total = await UserOperate.get_all_users(
+        include_inactive=True,
+        role=role_filter,
+        active_status=active_filter if isinstance(active_filter, bool) else None,
+        has_emby=has_emby_flag,
+        limit=100000,
+        offset=0,
+    )
+
+    # 二次过滤：尊重 include_admin/include_whitelist 默认值，跳过 PENDING_EMBY
+    target_uids: list[int] = []
+    skipped_admins = 0
+    skipped_whitelist = 0
+    skipped_pending_emby = 0
+    skipped_unrecognized = 0
+    for u in all_matching:
+        if u.ROLE == Role.UNRECOGNIZED.value:
+            skipped_unrecognized += 1
+            continue
+        if u.ROLE == Role.ADMIN.value and not include_admin:
+            skipped_admins += 1
+            continue
+        if u.ROLE == Role.WHITE_LIST.value and not include_whitelist:
+            skipped_whitelist += 1
+            continue
+        # 当前管理员自己强制保留，避免误把自己锁死
+        if u.UID == g.current_user.UID and expired_at != -1:
+            skipped_admins += 1
+            continue
+        # 未绑定 Emby 的账号默认跳过：它们 EXPIRED_AT=0 是 sentinel，不应该被随意覆盖
+        if not include_pending_emby and (
+            not u.EMBYID or bool(getattr(u, 'PENDING_EMBY', False))
+        ):
+            skipped_pending_emby += 1
+            continue
+        target_uids.append(int(u.UID))
+
+    matched = len(target_uids)
+
+    # 上限保护：单次最多 5000 个，超出要求用户更精细地筛选
+    if matched > 5000:
+        return api_response(
+            False,
+            f"匹配到 {matched} 个用户，超过单次上限 5000；请收紧筛选条件后重试",
+            code=400,
+        )
+
+    if not target_uids:
+        return api_response(True, "没有匹配的用户，未做任何更改", {
+            'matched': 0,
+            'updated': 0,
+            'expired_at': expired_at,
+            'skipped_admins': skipped_admins,
+            'skipped_whitelist': skipped_whitelist,
+            'skipped_pending_emby': skipped_pending_emby,
+            'skipped_unrecognized': skipped_unrecognized,
+        })
+
+    try:
+        updated = await UserOperate.batch_set_expired_at(target_uids, expired_at)
+    except ValueError as exc:
+        return api_response(False, str(exc), code=400)
+
+    logger.warning(
+        "管理员 %s 批量调控到期时间: matched=%d updated=%d target=%s "
+        "filter=%s include_admin=%s include_whitelist=%s include_pending_emby=%s",
+        g.current_user.USERNAME,
+        matched, updated, expired_at, filt,
+        include_admin, include_whitelist, include_pending_emby,
+    )
+
+    return api_response(True, f"已更新 {updated} 个用户到期时间", {
+        'matched': matched,
+        'updated': updated,
+        'expired_at': expired_at,
+        'skipped_admins': skipped_admins,
+        'skipped_whitelist': skipped_whitelist,
+        'skipped_pending_emby': skipped_pending_emby,
+        'skipped_unrecognized': skipped_unrecognized,
+    })
+
+
 # ==================== 无效用户清理 ====================
 
 @admin_bp.route('/users/cleanup-invalid', methods=['POST'])
@@ -2159,6 +2354,12 @@ async def bind_emby_to_user(uid: int):
 
     # 已被其他系统账号占用？
     occupant = await UserOperate.get_user_by_embyid(emby_user.id)
+    # Emby 绑定上限检查：只在"目标账号还没有 EMBYID 且这次会净增一个绑定"时强制
+    # （从占用者那里夺取 → 净增 0；目标已经有 EMBYID → 替换；目标无 EMBYID → 净增 1）
+    if not target_user.EMBYID and (occupant is None or occupant.UID == target_user.UID):
+        cap_ok, cap_msg = await UserService.check_emby_user_capacity()
+        if not cap_ok:
+            return api_response(False, cap_msg, code=409)
     if occupant and occupant.UID != target_user.UID:
         if not force:
             # 返回 200 以便前端读取 conflict 详情，由 success=false 表示业务未完成

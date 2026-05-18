@@ -262,6 +262,10 @@ async def use_invite_code():
     if inviter_depth + 1 > InviteService.max_depth():
         return api_response(False, "该邀请会超过最大层级限制", code=400)
 
+    cap_ok, cap_msg = await UserService.check_emby_user_capacity()
+    if not cap_ok:
+        return api_response(False, cap_msg, code=400)
+
     emby = get_emby_client()
     try:
         existing = await emby.get_user_by_name(emby_username)

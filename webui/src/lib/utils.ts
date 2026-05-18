@@ -10,7 +10,11 @@ export function formatDate(date: string | Date | number | null | undefined): str
   if (date == null || date === undefined || date === -1 || date === "-1") {
     return "永久";
   }
-  
+  // 0 = "未开通 Emby" 的 sentinel；显式做区分，避免被误格式成 1970 年
+  if (date === 0 || date === "0") {
+    return "未开通";
+  }
+
   // 处理时间戳（秒或毫秒）
   let d: Date;
   if (typeof date === 'number') {
@@ -44,7 +48,8 @@ export function formatNumber(num: number): string {
 
 export function formatRelativeTime(date: string | Date | number): string {
   if (!date || date === -1 || date === "-1") return "永久";
-  
+  if (date === 0 || date === "0") return "未开通";
+
   const now = new Date();
   let target: Date;
   

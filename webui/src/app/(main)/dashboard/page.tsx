@@ -26,6 +26,7 @@ import {
   Coins,
   Flame,
   Sparkles,
+  UserPlus,
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -37,8 +38,9 @@ import { useAsyncResource } from "@/hooks/use-async-resource";
 import { PageError } from "@/components/layout/page-state";
 import { useAuthStore } from "@/store/auth";
 import { useSystemStore } from "@/store/system";
-import { api, type EmbyInfo, type MediaRequest, type TelegramStatus, type SigninSummary } from "@/lib/api";
+import { api, type EmbyInfo, type MediaRequest, type TelegramStatus, type SigninSummary, type RegisterAvailability } from "@/lib/api";
 import { AnnouncementBoard } from "@/components/announcement-board";
+import { validatePasswordStrength } from "@/lib/password";
 
 const container = {
   hidden: { opacity: 0 },
@@ -78,6 +80,14 @@ export default function DashboardPage() {
   const [embyUsername, setEmbyUsername] = useState("");
   const [embyPassword, setEmbyPassword] = useState("");
   const [showEmbyPassword, setShowEmbyPassword] = useState(false);
+  const [registerAvailability, setRegisterAvailability] = useState<RegisterAvailability | null>(null);
+  const [showDirectRegisterDialog, setShowDirectRegisterDialog] = useState(false);
+  const [isSubmittingDirectRegister, setIsSubmittingDirectRegister] = useState(false);
+  const [directEmbyUsername, setDirectEmbyUsername] = useState("");
+  const [directEmbyPassword, setDirectEmbyPassword] = useState("");
+  const [showDirectEmbyPassword, setShowDirectEmbyPassword] = useState(false);
+  const [directSelectedDays, setDirectSelectedDays] = useState<number | null>(null);
+  const [directCustomDays, setDirectCustomDays] = useState("");
 
   const [telegramStatus, setTelegramStatus] = useState<TelegramStatus | null>(null);
   const [embyInfo, setEmbyInfo] = useState<EmbyInfo | null>(null);
@@ -94,12 +104,13 @@ export default function DashboardPage() {
   }, [fetchSystemInfo]);
 
   const loadDashboardData = useCallback(async (signal?: AbortSignal) => {
-    const [tgRes, embyRes, urlsRes, reqRes, signinRes] = await Promise.all([
+    const [tgRes, embyRes, urlsRes, reqRes, signinRes, registerRes] = await Promise.all([
       api.getTelegramStatus().catch(() => null),
       api.getEmbyInfo().catch(() => null),
       api.getEmbyUrls().catch(() => null),
       api.getMyRequests(signal).catch(() => null),
       api.getSigninSummary().catch(() => null),
+      api.getRegisterAvailability().catch(() => null),
     ]);
 
     if (signinRes && signinRes.success && signinRes.data) {
@@ -130,6 +141,9 @@ export default function DashboardPage() {
     }
     if (reqRes && reqRes.success && Array.isArray(reqRes.data)) {
       setMyRequests(reqRes.data);
+    }
+    if (registerRes && registerRes.success && registerRes.data) {
+      setRegisterAvailability(registerRes.data);
     }
     return true;
   }, []);
@@ -194,6 +208,28 @@ export default function DashboardPage() {
   useEffect(() => {
     if (lineSlots.length > 0) void runLineLatencyTests();
   }, [lineSlots, runLineLatencyTests]);
+
+  useEffect(() => {
+    setDirectEmbyUsername(user?.username || "");
+    setDirectEmbyPassword("");
+    setShowDirectEmbyPassword(false);
+    setDirectCustomDays("");
+  }, [user?.uid, user?.username]);
+
+  useEffect(() => {
+    if (!registerAvailability || directSelectedDays !== null) return;
+    const options = (registerAvailability.emby_direct_register_day_options || []).map((v) => Number(v)).filter((v) => Number.isFinite(v));
+    const fallback = Number(registerAvailability.emby_direct_register_days || 30);
+    if (options.includes(fallback)) {
+      setDirectSelectedDays(fallback);
+      return;
+    }
+    if (options.length > 0) {
+      setDirectSelectedDays(options[0]);
+      return;
+    }
+    setDirectSelectedDays(fallback);
+  }, [registerAvailability, directSelectedDays]);
 
   const renderLatencyText = (key: string) => {
     const info = lineLatencyMap[key];
@@ -263,21 +299,25 @@ export default function DashboardPage() {
   const isPendingEmby = Boolean(user?.pending_emby) && !user?.emby_id;
 
   let expiredTimestamp: number | null = null;
-  if (user?.expired_at) {
+  if (user?.expired_at !== undefined && user.expired_at !== null) {
     if (typeof user.expired_at === "number") {
-      if (user.expired_at !== -1) {
+      // -1 永久；0 未开通 sentinel；都不映射为真实时间戳
+      if (user.expired_at !== -1 && user.expired_at !== 0) {
         expiredTimestamp = user.expired_at < 10000000000 ? user.expired_at * 1000 : user.expired_at;
       }
-    } else if (typeof user.expired_at === "string" && user.expired_at !== "-1") {
+    } else if (typeof user.expired_at === "string" && user.expired_at !== "-1" && user.expired_at !== "0") {
       const parsed = new Date(user.expired_at).getTime();
       expiredTimestamp = Number.isNaN(parsed) ? null : parsed;
     }
   }
 
-  const isPermanent = isAdmin || expiredTimestamp === null;
+  // 未开通 Emby 时既不算"永久"也不算"已过期"，前端单独展示。
+  const isPermanent = !isPendingEmby && (isAdmin || expiredTimestamp === null);
   const safeExpiredTimestamp = expiredTimestamp ?? 0;
-  const isExpired = !isPermanent && safeExpiredTimestamp < Date.now();
-  const daysLeft = !isPermanent ? Math.max(0, Math.ceil((safeExpiredTimestamp - Date.now()) / (1000 * 60 * 60 * 24))) : 0;
+  const isExpired = !isPermanent && !isPendingEmby && safeExpiredTimestamp < Date.now();
+  const daysLeft = !isPermanent && !isPendingEmby
+    ? Math.max(0, Math.ceil((safeExpiredTimestamp - Date.now()) / (1000 * 60 * 60 * 24)))
+    : 0;
 
   const getGreeting = () => {
     const hour = new Date().getHours();
@@ -359,6 +399,100 @@ export default function DashboardPage() {
     }
   };
 
+  // ============== Emby 自由注册（登录后从仪表盘开通） ==============
+  const dayOptions = useMemo(() => {
+    const raw = (registerAvailability?.emby_direct_register_day_options || [])
+      .map((v) => Number(v))
+      .filter((v) => Number.isFinite(v));
+    return raw.length > 0 ? raw : [3, 7, 30, -1];
+  }, [registerAvailability?.emby_direct_register_day_options]);
+
+  const customDaysMin = Number(registerAvailability?.emby_direct_register_custom_days_min ?? 1);
+  const customDaysMax = Number(registerAvailability?.emby_direct_register_custom_days_max ?? 365);
+  const allowCustomDays = Boolean(registerAvailability?.emby_direct_register_allow_custom_days);
+
+  const directRegisterBlockedReason = useMemo<string | null>(() => {
+    if (!registerAvailability) return null;
+    if (!registerAvailability.emby_direct_register_enabled) return "管理员尚未开启自由注册";
+    if (user?.emby_id) return "您已经绑定了 Emby 账号";
+    if (!user?.telegram_id) return "请先在「设置 → Telegram」中完成 Telegram 绑定";
+    const limit = Number(registerAvailability.emby_user_limit ?? -1);
+    const used = Number(registerAvailability.emby_bound_users ?? 0);
+    if (limit > 0 && used >= limit) return `Emby 已绑定用户数已达上限（${used}/${limit}）`;
+    return null;
+  }, [registerAvailability, user?.emby_id, user?.telegram_id]);
+
+  const showEmbyDirectRegisterCard = Boolean(
+    registerAvailability?.emby_direct_register_enabled && !user?.emby_id,
+  );
+
+  const handleSubmitDirectRegister = async () => {
+    if (directRegisterBlockedReason) {
+      toast({ title: "暂时无法开通", description: directRegisterBlockedReason, variant: "destructive" });
+      return;
+    }
+    const username = directEmbyUsername.trim();
+    if (!username) {
+      toast({ title: "请输入 Emby 用户名", variant: "destructive" });
+      return;
+    }
+    const password = directEmbyPassword;
+    if (password.length < 8 || !/[a-z]/.test(password) || !/[A-Z]/.test(password) || !/\d/.test(password)) {
+      toast({
+        title: "密码强度不足",
+        description: "至少 8 位，且包含大小写字母和数字",
+        variant: "destructive",
+      });
+      return;
+    }
+
+    // 解析最终天数
+    let days: number;
+    if (directSelectedDays === null) {
+      // 默认走 emby_direct_register_days
+      days = Number(registerAvailability?.emby_direct_register_days ?? 30);
+    } else if (directSelectedDays === -2) {
+      // "自定义"挡位
+      const parsed = parseInt(directCustomDays, 10);
+      if (!Number.isFinite(parsed) || parsed <= 0) {
+        toast({ title: "请输入有效的天数", variant: "destructive" });
+        return;
+      }
+      if (parsed < customDaysMin || parsed > customDaysMax) {
+        toast({
+          title: "天数超出允许范围",
+          description: `允许范围：${customDaysMin}~${customDaysMax} 天`,
+          variant: "destructive",
+        });
+        return;
+      }
+      days = parsed;
+    } else {
+      days = directSelectedDays;
+    }
+
+    setIsSubmittingDirectRegister(true);
+    try {
+      const res = await api.completeEmbyRegistration(username, password, days);
+      if (res.success) {
+        toast({
+          title: "Emby 账号已开通",
+          description: days <= 0 ? "永久" : `开通时长 ${days} 天`,
+          variant: "success",
+        });
+        setShowDirectRegisterDialog(false);
+        setDirectEmbyPassword("");
+        await fetchUser();
+      } else {
+        toast({ title: "开通失败", description: res.message, variant: "destructive" });
+      }
+    } catch (err: any) {
+      toast({ title: "开通失败", description: err.message || "网络异常", variant: "destructive" });
+    } finally {
+      setIsSubmittingDirectRegister(false);
+    }
+  };
+
   const handleQuickSignin = async () => {
     if (signingIn) return;
     setSigningIn(true);
@@ -419,15 +553,20 @@ export default function DashboardPage() {
             <div className="p-3 w-fit bg-amber-500/10 text-amber-500 rounded-2xl">
               <Calendar className="h-5 w-5" />
             </div>
-            {!isPermanent && (
+            {!isPermanent && !isPendingEmby && (
               <Badge variant={isExpired ? "destructive" : daysLeft <= 7 ? "warning" : "outline"} className="text-[10px]">
                 {isExpired ? "已过期" : `剩 ${daysLeft} 天`}
+              </Badge>
+            )}
+            {isPendingEmby && (
+              <Badge variant="outline" className="text-[10px] text-muted-foreground">
+                未开通
               </Badge>
             )}
           </div>
           <p className="mt-4 text-[10px] font-black uppercase tracking-widest text-muted-foreground">到期倒计时</p>
           <h3 className="text-2xl sm:text-3xl font-black mt-1 break-all">
-            {isPermanent ? "∞ 永久" : `${daysLeft} 天`}
+            {isPendingEmby ? "—" : isPermanent ? "∞ 永久" : `${daysLeft} 天`}
           </h3>
         </motion.div>
 
@@ -437,7 +576,7 @@ export default function DashboardPage() {
           </div>
           <p className="mt-4 text-[10px] font-black uppercase tracking-widest text-muted-foreground">账号状态</p>
           <h3 className="text-2xl sm:text-3xl font-black mt-1">
-            {isPending ? "待开通 Emby" : isExpired ? "已过期" : "正常"}
+            {isPendingEmby ? "未开通 Emby" : isPending ? "待开通 Emby" : isExpired ? "已过期" : "正常"}
           </h3>
         </motion.div>
 
@@ -736,10 +875,147 @@ export default function DashboardPage() {
         </div>
       </motion.div>
 
+      {/* Emby 自由注册：登录后可在仪表盘开通 */}
+      {showEmbyDirectRegisterCard && (
+        <motion.div variants={item} className="premium-card p-5 sm:p-6">
+          <div className="flex items-center gap-3 mb-4">
+            <div className="p-2 bg-emerald-500/10 rounded-xl text-emerald-500">
+              <Gift className="h-5 w-5" />
+            </div>
+            <div>
+              <h3 className="text-base font-black tracking-tight">当前已开启 Emby 自由注册</h3>
+              <p className="text-[11px] text-muted-foreground font-bold uppercase tracking-tighter">
+                Direct Emby Registration
+              </p>
+            </div>
+          </div>
+
+          <div className="space-y-3 text-sm">
+            <p className="text-muted-foreground">
+              {directRegisterBlockedReason
+                ? directRegisterBlockedReason
+                : "无需注册码即可开通 Emby 账号；请选择开通时长后填写 Emby 用户名和密码。"}
+            </p>
+
+            <Button
+              className="rounded-xl font-black"
+              disabled={Boolean(directRegisterBlockedReason)}
+              onClick={() => {
+                setShowDirectRegisterDialog(true);
+              }}
+            >
+              <UserPlus className="mr-2 h-4 w-4" />
+              立即开通 Emby
+            </Button>
+          </div>
+        </motion.div>
+      )}
+
       {/* 公告板 —— 仪表盘最下方 */}
       <motion.div variants={item}>
         <AnnouncementBoard splitPinned />
       </motion.div>
+
+      {/* Emby 自由注册对话框 */}
+      <Dialog open={showDirectRegisterDialog} onOpenChange={setShowDirectRegisterDialog}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>开通 Emby 账号</DialogTitle>
+          </DialogHeader>
+
+          <div className="space-y-4 py-2 text-sm">
+            <div className="space-y-2">
+              <Label className="text-xs uppercase tracking-wider text-muted-foreground">开通时长</Label>
+              <div className="flex flex-wrap gap-1.5">
+                {dayOptions.map((d) => (
+                  <Button
+                    key={d}
+                    type="button"
+                    size="sm"
+                    variant={directSelectedDays === d ? "default" : "outline"}
+                    className="h-8 px-3 text-xs"
+                    onClick={() => setDirectSelectedDays(d)}
+                  >
+                    {d <= 0 ? "永久" : `${d} 天`}
+                  </Button>
+                ))}
+                {allowCustomDays && (
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant={directSelectedDays === -2 ? "default" : "outline"}
+                    className="h-8 px-3 text-xs"
+                    onClick={() => setDirectSelectedDays(-2)}
+                  >
+                    自定义
+                  </Button>
+                )}
+              </div>
+              {allowCustomDays && directSelectedDays === -2 && (
+                <Input
+                  type="number"
+                  min={customDaysMin}
+                  max={customDaysMax}
+                  placeholder={`${customDaysMin} ~ ${customDaysMax} 天`}
+                  value={directCustomDays}
+                  onChange={(e) => setDirectCustomDays(e.target.value)}
+                  className="h-9"
+                />
+              )}
+            </div>
+
+            <div className="space-y-2">
+              <Label htmlFor="directEmbyUser">Emby 用户名</Label>
+              <Input
+                id="directEmbyUser"
+                value={directEmbyUsername}
+                onChange={(e) => setDirectEmbyUsername(e.target.value)}
+                placeholder="3-20 位字母数字下划线，不能以数字开头"
+                disabled={isSubmittingDirectRegister}
+              />
+            </div>
+
+            <div className="space-y-2">
+              <Label htmlFor="directEmbyPwd">Emby 密码</Label>
+              <div className="relative">
+                <Input
+                  id="directEmbyPwd"
+                  type={showDirectEmbyPassword ? "text" : "password"}
+                  value={directEmbyPassword}
+                  onChange={(e) => setDirectEmbyPassword(e.target.value)}
+                  placeholder="至少 8 位，含大小写字母和数字"
+                  className="pr-10"
+                  disabled={isSubmittingDirectRegister}
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowDirectEmbyPassword((v) => !v)}
+                  className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
+                >
+                  {showDirectEmbyPassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                </button>
+              </div>
+            </div>
+
+            {directRegisterBlockedReason && (
+              <p className="rounded-md border border-destructive/40 bg-destructive/5 p-2 text-xs text-destructive">
+                {directRegisterBlockedReason}
+              </p>
+            )}
+          </div>
+
+          <div className="flex gap-3 justify-end">
+            <Button variant="outline" onClick={() => setShowDirectRegisterDialog(false)}>取消</Button>
+            <Button
+              onClick={handleSubmitDirectRegister}
+              disabled={isSubmittingDirectRegister || Boolean(directRegisterBlockedReason)}
+            >
+              {isSubmittingDirectRegister && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+              确认开通
+            </Button>
+          </div>
+        </DialogContent>
+      </Dialog>
 
       <Dialog open={showConfirm} onOpenChange={setShowConfirm}>
         <DialogContent>

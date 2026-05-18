@@ -17,6 +17,7 @@ from src.config import (
     SchedulerConfig, NotificationConfig, TelegramConfig,
     BangumiSyncConfig, SigninConfig,
     backup_config_file, fill_missing_config_items, get_primary_config_path,
+    normalize_storage_settings,
 )
 from src import __version__
 from src.db.user import UsersSessionFactory
@@ -88,6 +89,7 @@ def _reload_runtime_config() -> None:
     NotificationConfig.update_from_toml('Notification')
     BangumiSyncConfig.update_from_toml('BangumiSync')
     SigninConfig.update_from_toml('Signin')
+    normalize_storage_settings()
 
 
 def _infer_schema_field_type(key: str, value: Any) -> str:
@@ -461,6 +463,11 @@ async def get_admin_config():
             'register_code_limit': RegisterConfig.REGISTER_CODE_LIMIT,
             'emby_direct_register_enabled': RegisterConfig.EMBY_DIRECT_REGISTER_ENABLED,
             'emby_direct_register_days': RegisterConfig.EMBY_DIRECT_REGISTER_DAYS,
+            'emby_direct_register_day_options': RegisterConfig.EMBY_DIRECT_REGISTER_DAY_OPTIONS,
+            'emby_direct_register_allow_custom_days': RegisterConfig.EMBY_DIRECT_REGISTER_ALLOW_CUSTOM_DAYS,
+            'emby_direct_register_custom_days_min': RegisterConfig.EMBY_DIRECT_REGISTER_CUSTOM_DAYS_MIN,
+            'emby_direct_register_custom_days_max': RegisterConfig.EMBY_DIRECT_REGISTER_CUSTOM_DAYS_MAX,
+            'emby_user_limit': RegisterConfig.EMBY_USER_LIMIT,
             'emby_direct_register_workers': RegisterConfig.EMBY_DIRECT_REGISTER_WORKERS,
             'emby_direct_register_max_queue': RegisterConfig.EMBY_DIRECT_REGISTER_MAX_QUEUE,
             'emby_direct_register_status_ttl': RegisterConfig.EMBY_DIRECT_REGISTER_STATUS_TTL,
@@ -506,6 +513,7 @@ async def get_system_stats():
     # 用户统计
     total_users = await UserOperate.get_registered_users_count()
     active_users = await UserOperate.get_active_users_count()
+    emby_bound_users = await UserOperate.get_emby_bound_users_count()
     
     # 注册码统计（使用数据库层面计数，避免全量加载到内存）
     regcode_stats = await RegCodeOperate.get_regcode_stats()
@@ -522,6 +530,8 @@ async def get_system_stats():
             'active': active_users,
             'limit': RegisterConfig.USER_LIMIT,
             'usage_percent': round(total_users / RegisterConfig.USER_LIMIT * 100, 1) if RegisterConfig.USER_LIMIT > 0 else 0,
+            'emby_bound': emby_bound_users,
+            'emby_limit': RegisterConfig.EMBY_USER_LIMIT,
         },
         'regcodes': regcode_stats,
         'emby': emby_status,
@@ -686,6 +696,11 @@ async def get_config_schema():
                     {'key': 'allow_no_emby_view', 'label': '无Emby查看', 'type': 'bool', 'description': '是否允许未激活 Emby 账户的用户查看部分信息', 'value': RegisterConfig.ALLOW_NO_EMBY_VIEW},
                     {'key': 'emby_direct_register_enabled', 'label': '开启 Emby 自由注册', 'type': 'bool', 'description': '开启后用户可直接申请 Emby 账号（需先完成 Telegram 绑定）', 'value': RegisterConfig.EMBY_DIRECT_REGISTER_ENABLED},
                     {'key': 'emby_direct_register_days', 'label': '自由注册开通天数', 'type': 'int', 'description': 'Emby 自由注册成功后默认开通天数', 'value': RegisterConfig.EMBY_DIRECT_REGISTER_DAYS},
+                    {'key': 'emby_direct_register_day_options', 'label': '自由注册套餐天数', 'type': 'list', 'description': '自由注册可选天数列表，-1 表示永久（如 [3,7,30,-1]）', 'value': RegisterConfig.EMBY_DIRECT_REGISTER_DAY_OPTIONS},
+                    {'key': 'emby_direct_register_allow_custom_days', 'label': '允许自定义天数', 'type': 'bool', 'description': '开启后用户可输入自定义开通天数（受最小/最大值限制）', 'value': RegisterConfig.EMBY_DIRECT_REGISTER_ALLOW_CUSTOM_DAYS},
+                    {'key': 'emby_direct_register_custom_days_min', 'label': '自定义最小天数', 'type': 'int', 'description': '自由注册自定义天数下限', 'value': RegisterConfig.EMBY_DIRECT_REGISTER_CUSTOM_DAYS_MIN},
+                    {'key': 'emby_direct_register_custom_days_max', 'label': '自定义最大天数', 'type': 'int', 'description': '自由注册自定义天数上限', 'value': RegisterConfig.EMBY_DIRECT_REGISTER_CUSTOM_DAYS_MAX},
+                    {'key': 'emby_user_limit', 'label': 'Emby 用户上限', 'type': 'int', 'description': '系统中已绑定 Emby 的用户总上限，-1 表示不限制', 'value': RegisterConfig.EMBY_USER_LIMIT},
                     {'key': 'emby_direct_register_workers', 'label': '自由注册并发 Worker', 'type': 'int', 'description': '队列并发处理 worker 数（建议 4-16）', 'value': RegisterConfig.EMBY_DIRECT_REGISTER_WORKERS},
                     {'key': 'emby_direct_register_max_queue', 'label': '自由注册队列上限', 'type': 'int', 'description': '允许排队的最大请求数，超过后直接拒绝', 'value': RegisterConfig.EMBY_DIRECT_REGISTER_MAX_QUEUE},
                     {'key': 'emby_direct_register_status_ttl', 'label': '注册状态保留秒数', 'type': 'int', 'description': '注册完成后状态保留秒数，便于前端查询结果', 'value': RegisterConfig.EMBY_DIRECT_REGISTER_STATUS_TTL},

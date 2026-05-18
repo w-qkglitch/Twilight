@@ -307,13 +307,18 @@ class ApiClient {
     });
   }
 
-  async completeEmbyRegistration(embyUsername: string, embyPassword: string) {
+  async completeEmbyRegistration(embyUsername: string, embyPassword: string, days?: number) {
+    const payload: Record<string, unknown> = {
+      emby_username: embyUsername,
+      emby_password: embyPassword,
+    };
+    if (typeof days === "number") {
+      payload.days = days;
+    }
+
     return this.request<{ user: UserInfo }>("/users/me/emby/register", {
       method: "POST",
-      body: JSON.stringify({
-        emby_username: embyUsername,
-        emby_password: embyPassword,
-      }),
+      body: JSON.stringify(payload),
     });
   }
 
@@ -739,6 +744,36 @@ class ApiClient {
     return this.request<{ count: number }>("/admin/emby/reset-bindings", {
       method: "POST",
       body: JSON.stringify({ confirm: "RESET_ALL_EMBY" }),
+    });
+  }
+
+  /**
+   * 批量一键调控用户到期时间（按筛选条件覆盖普通用户）。
+   * 后端需要 confirm="BULK_EXPIRE_OK"；前端这里强制带上。
+   */
+  async adminBulkSetExpire(payload: {
+    expired_at?: number;          // -1 永久；正数 unix 秒
+    days?: number;                // 与 expired_at 二选一，正数 = 从现在起 N 天；<=0 视为永久
+    filter?: {
+      role?: number;
+      active?: boolean;
+      emby?: "bound" | "unbound";
+    };
+    include_admin?: boolean;
+    include_whitelist?: boolean;
+    include_pending_emby?: boolean;
+  }) {
+    return this.request<{
+      matched: number;
+      updated: number;
+      expired_at: number;
+      skipped_admins: number;
+      skipped_whitelist: number;
+      skipped_pending_emby: number;
+      skipped_unrecognized?: number;
+    }>("/admin/users/bulk-expire", {
+      method: "POST",
+      body: JSON.stringify({ ...payload, confirm: "BULK_EXPIRE_OK" }),
     });
   }
 
@@ -1446,6 +1481,12 @@ export interface RegisterAvailability {
   allow_pending_register: boolean;
   emby_direct_register_enabled: boolean;
   emby_direct_register_days: number;
+  emby_direct_register_day_options?: number[];
+  emby_direct_register_allow_custom_days?: boolean;
+  emby_direct_register_custom_days_min?: number;
+  emby_direct_register_custom_days_max?: number;
+  emby_user_limit?: number;
+  emby_bound_users?: number;
 }
 
 export interface EmbyRegisterStatus {
@@ -1568,7 +1609,8 @@ export interface SchedulerJobRun {
 
 export type SchedulerTriggerSpec =
   | { type: "cron_daily"; hour: number; minute: number }
-  | { type: "interval"; seconds: number };
+  | { type: "interval"; seconds: number }
+  | { type: "manual" };
 
 export interface SchedulerJobItem {
   id: string;
@@ -1582,6 +1624,11 @@ export interface SchedulerJobItem {
   trigger_spec: SchedulerTriggerSpec;
   default_trigger_spec: SchedulerTriggerSpec;
   is_custom: boolean;
+  /**
+   * 手动专属任务：不接受定时触发器，仅能手动触发。
+   * 后端在 JOB_DEFINITIONS 上打的标记，下发到前端用于隐藏"编辑触发器"按钮。
+   */
+  manual_only?: boolean;
 }
 
 

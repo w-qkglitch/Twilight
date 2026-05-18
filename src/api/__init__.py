@@ -7,7 +7,7 @@ from flask import Flask, jsonify, request
 
 from src.api.routes import api, admin_api
 from src.api.v1 import register_v1_blueprints
-from src.config import Config, APIConfig
+from src.config import Config, APIConfig, normalize_storage_settings
 from src.core.utils import setup_logging, timestamp
 
 
@@ -15,23 +15,22 @@ from flask_cors import CORS
 
 def create_app() -> Flask:
     """创建 Flask 应用"""
-    import os
     from pathlib import Path
-    from src.config import APIConfig
+    normalize_storage_settings()
     
-    # 获取上传目录配置
-    uploads_path = APIConfig.UPLOAD_FOLDER
+    # 获取上传目录配置（规范化后的绝对路径）
+    uploads_path = Path(APIConfig.UPLOAD_FOLDER).resolve()
     
     # 确保上传目录存在
-    os.makedirs(uploads_path, exist_ok=True)
+    uploads_path.mkdir(parents=True, exist_ok=True)
     
-    app = Flask(__name__, static_folder=uploads_path, static_url_path='/uploads')
+    app = Flask(__name__, static_folder=str(uploads_path), static_url_path='/uploads')
     
     # 配置
     app.config['JSON_AS_ASCII'] = False  # 支持中文
     app.config['JSON_SORT_KEYS'] = False
     app.config['MAX_CONTENT_LENGTH'] = APIConfig.MAX_UPLOAD_SIZE  # 最大上传文件大小
-    app.config['UPLOAD_FOLDER'] = uploads_path
+    app.config['UPLOAD_FOLDER'] = str(uploads_path)
     # uploads_path 目录作为静态文件目录挂载，用于存储上传的文件并通过 /uploads 提供访问
     
     # CORS 跨域支持

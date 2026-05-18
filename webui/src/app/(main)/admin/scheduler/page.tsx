@@ -114,6 +114,7 @@ function renderSummaryChips(summary: SchedulerJobRun["summary"]) {
 
 function describeTriggerSpec(spec: SchedulerTriggerSpec | undefined | null): string {
   if (!spec) return "—";
+  if (spec.type === "manual") return "仅手动触发";
   if (spec.type === "cron_daily") {
     const hh = String(spec.hour).padStart(2, "0");
     const mm = String(spec.minute).padStart(2, "0");
@@ -157,6 +158,14 @@ function ScheduleEditor({ job, open, onOpenChange, onSaved }: ScheduleEditorProp
   useEffect(() => {
     if (!open || !job) return;
     const spec = job.trigger_spec;
+    if (spec.type === "manual") {
+      setType("cron_daily");
+      setHour(0);
+      setMinute(0);
+      setIntervalValue(1);
+      setIntervalUnit("hours");
+      return;
+    }
     setType(spec.type);
     if (spec.type === "cron_daily") {
       setHour(spec.hour);
@@ -515,15 +524,22 @@ export default function AdminSchedulerPage() {
                       <CalendarClock className="h-3.5 w-3.5 shrink-0" />
                       <span className="truncate">
                         触发：{describeTriggerSpec(job.trigger_spec)}
-                        {job.is_custom && (
+                        {job.manual_only && (
+                          <Badge variant="outline" className="ml-1.5 text-[10px] px-1 py-0 border-amber-500/40 text-amber-600 dark:text-amber-400">
+                            仅手动
+                          </Badge>
+                        )}
+                        {!job.manual_only && job.is_custom && (
                           <Badge variant="outline" className="ml-1.5 text-[10px] px-1 py-0">已自定义</Badge>
                         )}
                       </span>
                     </div>
-                    <div className="flex items-center gap-2">
-                      <TimerReset className="h-3.5 w-3.5 shrink-0" />
-                      <span className="truncate">下次执行：{formatTimestamp(job.next_run_at)}</span>
-                    </div>
+                    {!job.manual_only && (
+                      <div className="flex items-center gap-2">
+                        <TimerReset className="h-3.5 w-3.5 shrink-0" />
+                        <span className="truncate">下次执行：{formatTimestamp(job.next_run_at)}</span>
+                      </div>
+                    )}
                   </div>
 
                   {lr && (
@@ -568,14 +584,16 @@ export default function AdminSchedulerPage() {
                       )}
                       {isRunning ? "运行中…" : "立即运行"}
                     </Button>
-                    <Button
-                      variant="outline"
-                      size="icon"
-                      onClick={() => setScheduleJob(job)}
-                      title="编辑触发器"
-                    >
-                      <Settings2 className="h-4 w-4" />
-                    </Button>
+                    {!job.manual_only && (
+                      <Button
+                        variant="outline"
+                        size="icon"
+                        onClick={() => setScheduleJob(job)}
+                        title="编辑触发器"
+                      >
+                        <Settings2 className="h-4 w-4" />
+                      </Button>
+                    )}
                     <Button
                       variant="outline"
                       size="icon"

@@ -17,6 +17,7 @@ import {
   Link2,
   AlertTriangle,
   UserPlus,
+  CalendarClock,
 } from "lucide-react";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -128,6 +129,16 @@ export default function AdminUsersPage() {
   const [forcePwdAuto, setForcePwdAuto] = useState(true);
   const [forcePwdLoading, setForcePwdLoading] = useState(false);
   const [forcePwdResult, setForcePwdResult] = useState<null | { emby_username: string; linked_local_user: boolean; new_password: string }>(null);
+
+  // 一键批量到期调控（仅按当前筛选条件作用于普通用户）
+  const [bulkExpireOpen, setBulkExpireOpen] = useState(false);
+  const [bulkExpireMode, setBulkExpireMode] = useState<"permanent" | "days">("permanent");
+  const [bulkExpireDays, setBulkExpireDays] = useState<string>("30");
+  const [bulkExpireIncludeAdmin, setBulkExpireIncludeAdmin] = useState(false);
+  const [bulkExpireIncludeWhitelist, setBulkExpireIncludeWhitelist] = useState(false);
+  const [bulkExpireIncludePending, setBulkExpireIncludePending] = useState(false);
+  const [bulkExpireConfirmText, setBulkExpireConfirmText] = useState("");
+  const [bulkExpireLoading, setBulkExpireLoading] = useState(false);
 
   const usersCacheRef = useRef<
     Map<string, { users: UserInfo[]; total: number; pages: number }>
@@ -493,6 +504,64 @@ export default function AdminUsersPage() {
     }
   };
 
+  const handleBulkExpire = async () => {
+    if (bulkExpireConfirmText.trim() !== "确认") {
+      toast({ title: "需要在文本框输入「确认」二字以继续", variant: "destructive" });
+      return;
+    }
+    let payload: Parameters<typeof api.adminBulkSetExpire>[0];
+    if (bulkExpireMode === "permanent") {
+      payload = { expired_at: -1 };
+    } else {
+      const days = parseInt(bulkExpireDays, 10);
+      if (!Number.isFinite(days) || days <= 0) {
+        toast({ title: "请输入正整数天数", variant: "destructive" });
+        return;
+      }
+      payload = { days };
+    }
+    // 把当前筛选条件透传到后端，作用范围与列表展示保持一致
+    const filter: NonNullable<Parameters<typeof api.adminBulkSetExpire>[0]["filter"]> = {};
+    if (roleFilter !== "all") filter.role = Number(roleFilter);
+    if (activeFilter !== "all") filter.active = activeFilter === "true";
+    if (embyFilter === "bound") filter.emby = "bound";
+    else if (embyFilter === "unbound") filter.emby = "unbound";
+    if (Object.keys(filter).length > 0) payload.filter = filter;
+    payload.include_admin = bulkExpireIncludeAdmin;
+    payload.include_whitelist = bulkExpireIncludeWhitelist;
+    payload.include_pending_emby = bulkExpireIncludePending;
+
+    setBulkExpireLoading(true);
+    try {
+      const res = await api.adminBulkSetExpire(payload);
+      if (res.success && res.data) {
+        const d = res.data;
+        const targetText =
+          bulkExpireMode === "permanent"
+            ? "永久"
+            : `${bulkExpireDays} 天后`;
+        toast({
+          title: `已更新 ${d.updated} 个用户到期时间为 ${targetText}`,
+          description:
+            `匹配 ${d.matched}；跳过：管理员 ${d.skipped_admins}` +
+            `，白名单 ${d.skipped_whitelist}` +
+            `，未开通 Emby ${d.skipped_pending_emby}`,
+          variant: "success",
+        });
+        invalidateUsersCache();
+        await loadUsers();
+        setBulkExpireOpen(false);
+        setBulkExpireConfirmText("");
+      } else {
+        toast({ title: "批量更新失败", description: res.message, variant: "destructive" });
+      }
+    } catch (err: any) {
+      toast({ title: "批量更新失败", description: err.message || "网络异常", variant: "destructive" });
+    } finally {
+      setBulkExpireLoading(false);
+    }
+  };
+
   const handleCleanupPreview = async () => {
     setCleanupLoading(true);
     setCleanupPreview(null);
@@ -547,6 +616,33 @@ export default function AdminUsersPage() {
       default:
         return <Badge variant="secondary">普通用户</Badge>;
     }
+  };
+
+  /**
+   * 根据 expired_at / pending_emby 渲染到期时间单元格。
+   * - 未绑定 Emby（pending_emby 或 expired_at===0）→"未开通"
+   * - -1 / "-1" → "永久"
+   * - 真实时间戳 → 用 formatDate；已过期红字
+   */
+  const renderExpireCell = (user: UserInfo) => {
+    const exp = user.expired_at;
+    const isUnopened =
+      Boolean(user.pending_emby) ||
+      exp === 0 ||
+      exp === "0";
+    if (isUnopened) {
+      return <span className="text-muted-foreground">未开通</span>;
+    }
+    if (exp === -1 || exp === "-1" || exp == null) {
+      return <span className="text-emerald-500">永久</span>;
+    }
+    const expMs = typeof exp === "number" && exp < 10000000000 ? exp * 1000 : Number(exp);
+    const expired = !Number.isNaN(expMs) && expMs < Date.now();
+    return (
+      <span className={expired ? "text-destructive" : undefined}>
+        {formatDate(exp)}
+      </span>
+    );
   };
 
   const renderUserActions = (user: UserInfo) => (
@@ -623,6 +719,21 @@ export default function AdminUsersPage() {
           >
             <UserPlus className="mr-2 h-4 w-4" />
             新建独立 Emby 账号
+          </Button>
+          <Button
+            variant="outline"
+            onClick={() => {
+              setBulkExpireMode("permanent");
+              setBulkExpireDays("30");
+              setBulkExpireIncludeAdmin(false);
+              setBulkExpireIncludeWhitelist(false);
+              setBulkExpireIncludePending(false);
+              setBulkExpireConfirmText("");
+              setBulkExpireOpen(true);
+            }}
+          >
+            <CalendarClock className="mr-2 h-4 w-4" />
+            批量到期调控
           </Button>
           <Button
             variant="outline"
@@ -812,9 +923,7 @@ export default function AdminUsersPage() {
                     </div>
                     <div>
                       <p className="text-xs text-muted-foreground">到期时间</p>
-                      <p className={user.expired_at && new Date(user.expired_at) < new Date() ? "mt-1 text-destructive" : "mt-1"}>
-                        {user.expired_at ? formatDate(user.expired_at) : "永久"}
-                      </p>
+                      <p className="mt-1">{renderExpireCell(user)}</p>
                     </div>
                   </div>
 
@@ -901,15 +1010,7 @@ export default function AdminUsersPage() {
                           </Badge>
                         )}
                       </td>
-                      <td className="px-4 py-3 text-sm">
-                        {user.expired_at ? (
-                          <span className={new Date(user.expired_at) < new Date() ? "text-destructive" : ""}>
-                            {formatDate(user.expired_at)}
-                          </span>
-                        ) : (
-                          <span className="text-emerald-500">永久</span>
-                        )}
-                      </td>
+                      <td className="px-4 py-3 text-sm">{renderExpireCell(user)}</td>
                       <td className="px-4 py-3 text-right">
                         {renderUserActions(user)}
                       </td>
@@ -1548,6 +1649,138 @@ export default function AdminUsersPage() {
                 绑定
               </Button>
             )}
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* 一键批量到期调控 */}
+      <Dialog open={bulkExpireOpen} onOpenChange={setBulkExpireOpen}>
+        <DialogContent className="max-w-lg">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <CalendarClock className="h-5 w-5" />
+              一键批量调控到期时间
+            </DialogTitle>
+            <DialogDescription>
+              将根据上方筛选条件（角色/状态/Emby 绑定）批量覆盖普通用户的到期时间。
+              管理员、白名单与未开通 Emby 的账号默认会被跳过，避免误伤。
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="space-y-4 text-sm">
+            <div className="space-y-2">
+              <Label className="text-xs uppercase tracking-wider text-muted-foreground">目标到期时间</Label>
+              <div className="flex flex-wrap items-center gap-2">
+                <Button
+                  type="button"
+                  size="sm"
+                  variant={bulkExpireMode === "permanent" ? "default" : "outline"}
+                  onClick={() => setBulkExpireMode("permanent")}
+                >
+                  永久
+                </Button>
+                <div className="flex items-center gap-1.5">
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant={bulkExpireMode === "days" ? "default" : "outline"}
+                    onClick={() => setBulkExpireMode("days")}
+                  >
+                    自定义天数
+                  </Button>
+                  <Input
+                    type="number"
+                    min={1}
+                    value={bulkExpireDays}
+                    onChange={(e) => {
+                      setBulkExpireDays(e.target.value);
+                      setBulkExpireMode("days");
+                    }}
+                    placeholder="天数"
+                    className="h-8 w-24"
+                  />
+                  <span className="text-xs text-muted-foreground">天</span>
+                </div>
+              </div>
+              <p className="text-[11px] text-muted-foreground">
+                {bulkExpireMode === "permanent"
+                  ? "将设置为永久（EXPIRED_AT=-1）。"
+                  : "从当前时间起 N 天后过期。"}
+              </p>
+            </div>
+
+            <div className="rounded-md border bg-muted/30 p-3 space-y-2">
+              <p className="text-xs font-medium">作用范围（当前筛选条件）</p>
+              <div className="text-xs text-muted-foreground space-y-0.5">
+                <p>角色：{roleFilter === "all" ? "全部" : roleFilter === "0" ? "管理员" : roleFilter === "1" ? "普通用户" : "白名单"}</p>
+                <p>启用状态：{activeFilter === "all" ? "全部" : activeFilter === "true" ? "仅已启用" : "仅已禁用"}</p>
+                <p>Emby 绑定：{embyFilter === "all" ? "全部" : embyFilter === "bound" ? "已绑定" : "未绑定"}</p>
+              </div>
+            </div>
+
+            <div className="space-y-2">
+              <Label className="text-xs uppercase tracking-wider text-muted-foreground">额外选项</Label>
+              <div className="space-y-1.5">
+                <label className="flex items-start gap-2 text-xs cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={bulkExpireIncludeAdmin}
+                    onChange={(e) => setBulkExpireIncludeAdmin(e.target.checked)}
+                    className="mt-0.5 h-4 w-4 rounded"
+                  />
+                  <span>
+                    包含管理员账号（默认跳过；包含后<strong>仍不会改你自己</strong>，除非把"永久"选项手动改成具体天数前请慎重）
+                  </span>
+                </label>
+                <label className="flex items-start gap-2 text-xs cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={bulkExpireIncludeWhitelist}
+                    onChange={(e) => setBulkExpireIncludeWhitelist(e.target.checked)}
+                    className="mt-0.5 h-4 w-4 rounded"
+                  />
+                  <span>包含白名单用户（一旦取消勾选，白名单的"永久"标签将被覆盖）</span>
+                </label>
+                <label className="flex items-start gap-2 text-xs cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={bulkExpireIncludePending}
+                    onChange={(e) => setBulkExpireIncludePending(e.target.checked)}
+                    className="mt-0.5 h-4 w-4 rounded"
+                  />
+                  <span>包含未开通 Emby 的账号（强烈不推荐：会把"未开通" sentinel 改为真实到期时间）</span>
+                </label>
+              </div>
+            </div>
+
+            <div className="space-y-1.5 rounded-md border border-destructive/40 bg-destructive/5 p-3">
+              <Label className="text-xs uppercase tracking-wider text-destructive">
+                二次确认
+              </Label>
+              <p className="text-xs text-muted-foreground">
+                请在下方输入 <span className="font-mono text-foreground">确认</span> 二字以继续：
+              </p>
+              <Input
+                value={bulkExpireConfirmText}
+                onChange={(e) => setBulkExpireConfirmText(e.target.value)}
+                placeholder="确认"
+                className="h-9"
+              />
+            </div>
+          </div>
+
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setBulkExpireOpen(false)} disabled={bulkExpireLoading}>
+              取消
+            </Button>
+            <Button
+              variant="destructive"
+              onClick={handleBulkExpire}
+              disabled={bulkExpireLoading || bulkExpireConfirmText.trim() !== "确认"}
+            >
+              {bulkExpireLoading && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+              执行批量调控
+            </Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>

@@ -167,8 +167,13 @@ def seconds_to_days(seconds: int) -> float:
 
 
 def is_expired(expire_timestamp: int) -> bool:
-    """检查时间戳是否已过期（-1 表示永不过期）"""
-    if expire_timestamp == -1:
+    """检查时间戳是否已过期。
+
+    特殊值：
+      -1 → 永不过期
+      0  → 待开通（账号还没绑定 Emby，没有真实到期概念）
+    """
+    if expire_timestamp == -1 or expire_timestamp == 0:
         return False
     return timestamp() > expire_timestamp
 
@@ -198,14 +203,21 @@ def format_duration(seconds: int) -> str:
 
 
 def format_expire_time(expire_timestamp: int) -> str:
-    """格式化过期时间"""
+    """格式化过期时间。
+
+    - ``0``：账号尚未绑定 Emby，没有到期概念，显示"未开通"。
+    - ``-1`` / ``>= 9999-12-31``：永不过期。
+    - 其它：返回剩余时间或"已过期"。
+    """
+    if expire_timestamp == 0:
+        return "未开通"
     if expire_timestamp == -1 or expire_timestamp >= 253402214400:
         return "永不过期"
-    
+
     remaining = expire_timestamp - timestamp()
     if remaining <= 0:
         return "已过期"
-    
+
     return f"剩余 {format_duration(remaining)}"
 
 

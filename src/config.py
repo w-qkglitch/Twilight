@@ -24,6 +24,29 @@ logger = logging.getLogger(__name__)
 ROOT_PATH: Path = Path(__file__).parent.parent.resolve()
 
 
+def resolve_storage_path(value: Union[str, Path], field_name: str) -> Path:
+    """解析并规范化存储路径。
+
+    - 相对路径: 相对于项目根目录，并要求最终路径仍位于项目根目录内。
+    - 绝对路径: 允许使用，按 ``resolve`` 规范化。
+    """
+    raw = Path(value) if isinstance(value, Path) else Path(str(value or '').strip())
+    if not str(raw):
+        raise ValueError(f"{field_name} 不能为空")
+
+    if raw.is_absolute():
+        return raw.resolve()
+
+    resolved = (ROOT_PATH / raw).resolve()
+    try:
+        resolved.relative_to(ROOT_PATH)
+    except ValueError as exc:
+        raise ValueError(
+            f"{field_name} 使用相对路径时不能逃逸项目目录: {value}"
+        ) from exc
+    return resolved
+
+
 def get_primary_config_path() -> Path:
     """返回主配置文件路径（支持环境变量覆盖）。"""
     return Path(os.environ.get("TWILIGHT_CONFIG_FILE", str(ROOT_PATH / 'config.toml')))
@@ -182,7 +205,11 @@ class BaseConfig:
                 # 如果原始值是 Path 类型，将字符串转换为 Path
                 current_value = getattr(cls, attr_name)
                 if isinstance(current_value, Path) and isinstance(value, str):
-                    value = ROOT_PATH / value if not os.path.isabs(value) else Path(value)
+                    try:
+                        value = resolve_storage_path(value, f"{section or 'Global'}.{toml_key}")
+                    except ValueError as err:
+                        logger.warning(str(err))
+                        continue
                 setattr(cls, attr_name, value)
 
     @classmethod
@@ -368,6 +395,11 @@ class RegisterConfig(BaseConfig):
     ALLOW_NO_EMBY_VIEW: bool = True  # 是否允许无 Emby 账户的用户查看部分信息
     EMBY_DIRECT_REGISTER_ENABLED: bool = False  # 是否开启 Emby 自由注册
     EMBY_DIRECT_REGISTER_DAYS: int = 30  # Emby 自由注册默认开通天数
+    EMBY_DIRECT_REGISTER_DAY_OPTIONS: List[int] = [3, 7, 30, -1]  # 自由注册可选套餐天数（-1 表示永久）
+    EMBY_DIRECT_REGISTER_ALLOW_CUSTOM_DAYS: bool = False  # 是否允许自定义天数
+    EMBY_DIRECT_REGISTER_CUSTOM_DAYS_MIN: int = 1  # 自定义最小天数
+    EMBY_DIRECT_REGISTER_CUSTOM_DAYS_MAX: int = 365  # 自定义最大天数
+    EMBY_USER_LIMIT: int = -1  # Emby 绑定用户总上限（-1 表示不限制）
     EMBY_DIRECT_REGISTER_WORKERS: int = 8  # Emby 自由注册队列 worker 数
     EMBY_DIRECT_REGISTER_MAX_QUEUE: int = 1000  # Emby 自由注册队列最大排队数
     EMBY_DIRECT_REGISTER_STATUS_TTL: int = 1800  # Emby 自由注册状态保留秒数
@@ -415,6 +447,28 @@ class APIConfig(BaseConfig):
     SESSION_COOKIE_SAMESITE: str = 'Lax'  # Strict / Lax / None
     SESSION_COOKIE_DOMAIN: str = ''
     SESSION_COOKIE_PATH: str = '/'
+
+
+def normalize_storage_settings() -> None:
+    """规范化数据库目录与上传目录路径。"""
+    try:
+        Config.DATABASES_DIR = resolve_storage_path(
+            Config.DATABASES_DIR,
+            "Global.databases_dir",
+        )
+    except ValueError as err:
+        logger.warning("%s，回退默认数据库目录", err)
+        Config.DATABASES_DIR = (ROOT_PATH / 'db').resolve()
+
+    try:
+        upload_dir = resolve_storage_path(
+            APIConfig.UPLOAD_FOLDER,
+            "API.upload_folder",
+        )
+    except ValueError as err:
+        logger.warning("%s，回退默认上传目录", err)
+        upload_dir = (ROOT_PATH / 'uploads').resolve()
+    APIConfig.UPLOAD_FOLDER = str(upload_dir)
 
 
 class SecurityConfig(BaseConfig):
@@ -479,6 +533,7 @@ SchedulerConfig.update_from_toml('Scheduler')
 NotificationConfig.update_from_toml('Notification')
 BangumiSyncConfig.update_from_toml('BangumiSync')
 SigninConfig.update_from_toml('Signin')
+normalize_storage_settings()
 
 # 启动时自动补全缺失的配置项
 _config_classes = [

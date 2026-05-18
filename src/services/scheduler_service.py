@@ -31,21 +31,38 @@ class RunContext:
             ctx.log("开始处理…")
             ctx.summary['scanned'] = 10
             ctx.summary['disabled'] = 0
+
+    ``trigger`` 记录此次执行的来源（``scheduled`` / ``manual`` / ``startup``）。
+    每条日志行会自动带上 ``[auto]`` / ``[manual]`` / ``[startup]`` 前缀，方便
+    审计和前端区分手动触发 vs 自动调度。
     """
 
-    def __init__(self, job_id: str):
+    # trigger → 日志前缀
+    _TRIGGER_TAG_MAP = {
+        'scheduled': 'auto',
+        'manual': 'manual',
+        'startup': 'startup',
+    }
+
+    def __init__(self, job_id: str, trigger: str = 'scheduled'):
         self.job_id = job_id
+        self.trigger = trigger
         self.summary: dict[str, Any] = {}
         self.logs: list[str] = []
         self._max_logs = 800  # 内存里挡一道，落库会再截断
 
+    @property
+    def _trigger_tag(self) -> str:
+        return self._TRIGGER_TAG_MAP.get(self.trigger, self.trigger or 'auto')
+
     def log(self, message: str) -> None:
-        line = f"[{time.strftime('%H:%M:%S')}] {message}"
+        tag = self._trigger_tag
+        line = f"[{time.strftime('%H:%M:%S')}] [{tag}] {message}"
         if len(self.logs) >= self._max_logs:
             # 丢掉最早的，保留最新
             del self.logs[: len(self.logs) - self._max_logs + 1]
         self.logs.append(line)
-        logger.info(f"[{self.job_id}] {message}")
+        logger.info(f"[{self.job_id}][{tag}] {message}")
 
 
 class SchedulerService:
@@ -123,6 +140,18 @@ class SchedulerService:
                 'unit': 'minutes', 'source': 'TelegramConfig',
             },
         },
+        {
+            'id': 'kick_unknown_group_members',
+            'name': 'Telegram 群组非系统成员清理（手动）',
+            'description': (
+                '⚠️ 仅手动触发：扫描已知 Telegram 用户 ID（来自 users 表与 telegram_bind_codes），'
+                '把其中"已经不在系统活跃用户里"且仍在群组中的 TG 账号"临时踢出"（ban + 立刻 unban）。'
+                '排除 Bot/群管理员/群主以及配置中的管理员账号。'
+                '受 Bot API 限制，无法枚举系统从未见过的全量群成员。'
+            ),
+            'default_trigger': None,
+            'manual_only': True,
+        },
     ]
 
     @classmethod
@@ -183,7 +212,7 @@ class SchedulerService:
             logger.warning(f"无法创建 scheduler_run 记录: {exc}")
             run_id = 0
 
-        ctx = RunContext(job_id)
+        ctx = RunContext(job_id, trigger=trigger)
         error_text: Optional[str] = None
         try:
             await fn(ctx)
@@ -245,8 +274,12 @@ class SchedulerService:
         返回结构：
             {'type': 'cron_daily', 'hour': 3, 'minute': 0}
             {'type': 'interval', 'seconds': 3600}
+        手动专属任务（``default_trigger=None``）返回 ``{'type': 'manual'}``。
         """
-        spec = definition.get('default_trigger', {})
+        if definition.get('manual_only'):
+            return {'type': 'manual'}
+
+        spec = definition.get('default_trigger') or {}
         field = spec.get('config_field')
         source = spec.get('source', 'SchedulerConfig')
         config_obj = SchedulerConfig if source == 'SchedulerConfig' else TelegramConfig
@@ -274,6 +307,9 @@ class SchedulerService:
     @classmethod
     async def _effective_trigger(cls, definition: dict) -> tuple[dict, bool]:
         """优先取 DB override，其次回退默认。返回 (spec, is_custom)。"""
+        # 手动专属任务：不接受 cron/interval override
+        if definition.get('manual_only'):
+            return {'type': 'manual'}, False
         override = await SchedulerScheduleOperate.get_override(definition['id'])
         if override:
             if override['type'] == TRIGGER_CRON_DAILY and override.get('hour') is not None:
@@ -394,6 +430,7 @@ class SchedulerService:
 
             items.append({
                 **{k: v for k, v in definition.items() if k != 'default_trigger'},
+                'manual_only': bool(definition.get('manual_only')),
                 'enabled': scheduled is not None,
                 'schedule': schedule_str,
                 'next_run_at': next_run,
@@ -642,6 +679,113 @@ class SchedulerService:
             raise
 
     @staticmethod
+    async def kick_unknown_group_members(ctx: RunContext):
+        """手动专属：踢出"已知 TG ID 中、当前不在系统活跃用户里"的群成员。
+
+        - 仅扫描已配置的群组（取 TelegramConfig.GROUP_ID 第一个）。
+        - 候选集合：``users.TELEGRAM_ID`` ∪ ``telegram_bind_codes.CONFIRMED_TELEGRAM_ID``。
+          Bot API 没法枚举陌生群成员，所以这里只是"清理我们见过但已经不该在群里的 TG 账号"。
+        - 排除：群管理员/群主、Bot 自身、配置中的管理员账号、所有"系统中活跃且仍持有该 TG 绑定"的 ID。
+        - 踢出策略：``ban + unban``（临时移除，能再加回来）。
+        """
+        from src.config import TelegramConfig
+        from src.services.telegram_membership import TelegramMembershipService
+        from src.db.user import UserOperate, UserModel, Role, TelegramBindCodeModel, UsersSessionFactory
+        from sqlalchemy import select as _select
+
+        ctx.summary['enabled'] = False
+
+        if not TelegramMembershipService.is_bot_available():
+            ctx.log("⚠️ Bot 未就绪或 Telegram 未启用，跳过")
+            return
+        group_ids = TelegramMembershipService.required_group_ids()
+        if not group_ids:
+            ctx.log("⚠️ 未配置 TelegramConfig.GROUP_ID，跳过")
+            return
+        chat_id = group_ids[0]
+        ctx.summary['enabled'] = True
+        ctx.summary['chat_id'] = str(chat_id)
+
+        # 候选 TG ID 集合
+        ctx.log("📋 收集候选 TG ID...")
+        candidate_ids: set[int] = set()
+        excluded_ids: set[int] = set()
+        async with UsersSessionFactory() as session:
+            # 所有 users.TELEGRAM_ID
+            user_rows = (await session.execute(
+                _select(UserModel.TELEGRAM_ID, UserModel.ACTIVE_STATUS, UserModel.ROLE)
+                .where(UserModel.TELEGRAM_ID.isnot(None))
+            )).all()
+            for tg_id, active, role in user_rows:
+                if tg_id is None:
+                    continue
+                try:
+                    tg_int = int(tg_id)
+                except (TypeError, ValueError):
+                    continue
+                candidate_ids.add(tg_int)
+                # 系统内"活跃且非未识别"的就排除；管理员/白名单永远排除
+                if role in (Role.ADMIN.value, Role.WHITE_LIST.value):
+                    excluded_ids.add(tg_int)
+                elif bool(active) and role != Role.UNRECOGNIZED.value:
+                    excluded_ids.add(tg_int)
+
+            # telegram_bind_codes 里 confirmed 的 TG ID（这些可能从未完成绑定）
+            bind_rows = (await session.execute(
+                _select(TelegramBindCodeModel.CONFIRMED_TELEGRAM_ID)
+                .where(TelegramBindCodeModel.CONFIRMED_TELEGRAM_ID.isnot(None))
+            )).all()
+            for (tg_id,) in bind_rows:
+                if tg_id is None:
+                    continue
+                try:
+                    candidate_ids.add(int(tg_id))
+                except (TypeError, ValueError):
+                    continue
+
+        # 配置中静态指定的管理员 TG ID（TelegramConfig.ADMIN_ID）也排除
+        raw_admin = TelegramConfig.ADMIN_ID
+        admin_seq = raw_admin if isinstance(raw_admin, (list, tuple)) else [raw_admin]
+        for raw in admin_seq:
+            try:
+                excluded_ids.add(int(raw))
+            except (TypeError, ValueError):
+                continue
+
+        # 群管理员 / 群主：通过 Bot API 实时获取
+        admin_ids = await TelegramMembershipService.fetch_group_admin_ids(chat_id)
+        excluded_ids.update(admin_ids)
+        ctx.summary['admins_excluded'] = len(admin_ids)
+        ctx.summary['candidates_total'] = len(candidate_ids)
+        ctx.summary['excluded_total'] = len(excluded_ids)
+
+        targets = [tid for tid in candidate_ids if tid not in excluded_ids]
+        ctx.summary['targets'] = len(targets)
+        if not targets:
+            ctx.log("✅ 没有可处理的候选 TG ID（全部被系统已知活跃用户/管理员吸收）")
+            return
+
+        ctx.log(f"🛠️ 待清理 {len(targets)} 个 TG ID（已排除管理员/活跃用户/Bot）")
+        result = await TelegramMembershipService.kick_unknown_members(
+            chat_id,
+            list(targets),
+            excluded_ids=set(excluded_ids),
+            max_per_run=200,
+        )
+
+        for key in ('scanned', 'kicked', 'skipped', 'failed', 'not_in_group'):
+            ctx.summary[key] = int(result.get(key, 0) or 0)
+
+        details = result.get('details') or []
+        for item in details[:20]:
+            ctx.log(f"  ℹ️ {item}")
+
+        ctx.log(
+            "✅ 清理完成: kicked={kicked} skipped={skipped} "
+            "not_in_group={not_in_group} failed={failed}".format(**ctx.summary)
+        )
+
+    @staticmethod
     async def cleanup_no_emby_users(ctx: RunContext):
         """清理注册后长期未创建 Emby 账户的用户"""
         if not RegisterConfig.AUTO_CLEANUP_NO_EMBY:
@@ -728,6 +872,9 @@ class SchedulerService:
 
         for definition in cls.JOB_DEFINITIONS:
             jid = definition['id']
+            if definition.get('manual_only'):
+                # 手动专属任务不进入 APScheduler；trigger_job 直接拉起
+                continue
             if jid == 'enforce_group_membership' and not TelegramMembershipService.enforcement_enabled():
                 continue
             spec, _custom = await cls._effective_trigger(definition)
@@ -749,6 +896,7 @@ class SchedulerService:
             'emby_sync': cls.emby_sync,
             'cleanup_no_emby': cls.cleanup_no_emby_users,
             'enforce_group_membership': cls.enforce_group_membership,
+            'kick_unknown_group_members': cls.kick_unknown_group_members,
         }
 
     # ============== 管理 API：在线修改 / 重置触发器 ==============
@@ -767,6 +915,8 @@ class SchedulerService:
         definition = cls._get_definition(job_id)
         if not definition:
             return False, f"未知任务: {job_id}", None
+        if definition.get('manual_only'):
+            return False, "该任务仅支持手动触发，不能配置定时触发器", None
 
         try:
             override = await SchedulerScheduleOperate.upsert_override(
@@ -791,6 +941,8 @@ class SchedulerService:
         definition = cls._get_definition(job_id)
         if not definition:
             return False, f"未知任务: {job_id}", None
+        if definition.get('manual_only'):
+            return False, "该任务仅支持手动触发，无可恢复的默认触发器", None
 
         await SchedulerScheduleOperate.delete_override(job_id)
         spec = cls._resolve_default_trigger(definition)

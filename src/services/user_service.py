@@ -66,6 +66,110 @@ class UserService:
         return "永久" if days <= 0 else f"{days} 天"
 
     @staticmethod
+    def _normalize_emby_user_limit() -> int:
+        try:
+            limit = int(getattr(RegisterConfig, 'EMBY_USER_LIMIT', -1))
+        except (TypeError, ValueError):
+            limit = -1
+        return -1 if limit <= 0 else limit
+
+    @staticmethod
+    def get_emby_user_limit() -> int:
+        """读取 Emby 绑定用户上限（-1 表示不限制）。"""
+        return UserService._normalize_emby_user_limit()
+
+    @staticmethod
+    async def get_emby_bound_user_count() -> int:
+        return await UserOperate.get_emby_bound_users_count()
+
+    @staticmethod
+    async def check_emby_user_capacity() -> Tuple[bool, str]:
+        """检查 Emby 绑定用户总量是否达到上限。"""
+        limit = UserService.get_emby_user_limit()
+        if limit <= 0:
+            return True, ""
+
+        current = await UserService.get_emby_bound_user_count()
+        if current >= limit:
+            return False, f"Emby 已绑定用户数已达上限（{current}/{limit}）"
+        return True, ""
+
+    @staticmethod
+    def get_emby_direct_register_day_options() -> List[int]:
+        """获取自由注册可选套餐天数（去重并规范化，-1 表示永久）。"""
+        raw_options = getattr(RegisterConfig, 'EMBY_DIRECT_REGISTER_DAY_OPTIONS', [3, 7, 30, -1])
+        if not isinstance(raw_options, list):
+            raw_options = [3, 7, 30, -1]
+
+        normalized: List[int] = []
+        for item in raw_options:
+            try:
+                parsed = int(item)
+            except (TypeError, ValueError):
+                continue
+            value = -1 if parsed <= 0 else parsed
+            if value not in normalized:
+                normalized.append(value)
+
+        if not normalized:
+            return [3, 7, 30, -1]
+        return normalized
+
+    @staticmethod
+    def get_emby_direct_register_custom_days_range() -> Tuple[int, int]:
+        """获取自由注册自定义天数区间。"""
+        try:
+            min_days = int(getattr(RegisterConfig, 'EMBY_DIRECT_REGISTER_CUSTOM_DAYS_MIN', 1))
+        except (TypeError, ValueError):
+            min_days = 1
+
+        try:
+            max_days = int(getattr(RegisterConfig, 'EMBY_DIRECT_REGISTER_CUSTOM_DAYS_MAX', 365))
+        except (TypeError, ValueError):
+            max_days = 365
+
+        if min_days < 1:
+            min_days = 1
+        if max_days < min_days:
+            max_days = min_days
+        return min_days, max_days
+
+    @staticmethod
+    def resolve_emby_direct_register_days(
+        user: UserModel,
+        requested_days: Optional[int] = None,
+    ) -> Tuple[bool, Optional[int], str]:
+        """解析用户补建 Emby 时应使用的开通天数。"""
+        pending_days = getattr(user, 'PENDING_EMBY_DAYS', None)
+        if pending_days is not None:
+            days = UserService._normalize_code_days(pending_days, default=30)
+            return True, days, ""
+
+        if not RegisterConfig.EMBY_DIRECT_REGISTER_ENABLED:
+            return False, None, "当前未开启自由注册 Emby"
+
+        if not getattr(user, 'TELEGRAM_ID', None):
+            return False, None, "自由注册 Emby 前请先绑定 Telegram"
+
+        default_days = UserService._normalize_code_days(RegisterConfig.EMBY_DIRECT_REGISTER_DAYS, default=30)
+        selected_days = default_days if requested_days is None else UserService._normalize_code_days(requested_days, default=default_days)
+
+        day_options = UserService.get_emby_direct_register_day_options()
+        allow_custom = bool(getattr(RegisterConfig, 'EMBY_DIRECT_REGISTER_ALLOW_CUSTOM_DAYS', False))
+        custom_min, custom_max = UserService.get_emby_direct_register_custom_days_range()
+
+        if selected_days in day_options:
+            return True, selected_days, ""
+
+        if allow_custom and selected_days > 0:
+            if selected_days < custom_min or selected_days > custom_max:
+                return False, None, f"自定义天数需在 {custom_min}~{custom_max} 天之间"
+            return True, selected_days, ""
+
+        options_text = "、".join(["永久" if d <= 0 else f"{d}天" for d in day_options])
+        return False, None, f"当前仅支持以下开通时长：{options_text}"
+
+    @staticmethod
     def validate_password_strength(password: Optional[str], label: str = "密码") -> Tuple[bool, str]:
         """统一的密码强度校验：≥ 8 位，且包含大小写字母与数字。"""
         if password is None or password == "":
@@ -278,7 +382,7 @@ class UserService:
                 telegram_id=telegram_id,
                 username=username,
                 email=email,
-                days=max(int(RegisterConfig.EMBY_DIRECT_REGISTER_DAYS or 30), 1),
+                days=UserService._normalize_code_days(RegisterConfig.EMBY_DIRECT_REGISTER_DAYS, default=30),
                 password=password,
             )
         finally:
@@ -410,6 +514,8 @@ class UserService:
                 )
             else:
                 # 普通用户：已激活但无 Emby 账户
+                # EXPIRED_AT=0 是"未开通 Emby"的 sentinel，区别于 -1（永久）和正数（真实到期时间）。
+                # 一旦补建 Emby 成功，complete_emby_registration / 绑定流程会把它改成真实时间。
                 user = UserModel(
                     UID=new_uid,
                     TELEGRAM_ID=telegram_id,
@@ -419,7 +525,7 @@ class UserService:
                     PASSWORD=hash_password(user_password),
                     ROLE=Role.NORMAL.value,
                     ACTIVE_STATUS=True,  # 账户激活，可以登录
-                    EXPIRED_AT=-1,
+                    EXPIRED_AT=0,
                     CREATE_AT=created_at,
                     REGISTER_TIME=created_at,
                     PENDING_EMBY=True,
@@ -446,9 +552,9 @@ class UserService:
         user: UserModel,
         emby_username: str,
         emby_password: str,
+        requested_days: Optional[int] = None,
     ) -> RegisterResponse:
         """已登录用户补建 Emby 账号；失败保留 PENDING_EMBY 标记便于重试。"""
-        from src.config import RegisterConfig
         import json
 
         if user.EMBYID:
@@ -467,12 +573,23 @@ class UserService:
         if not ok:
             return RegisterResponse(RegisterResult.ERROR, msg)
 
+        days_ok, days, days_msg = UserService.resolve_emby_direct_register_days(
+            user,
+            requested_days=requested_days,
+        )
+        if not days_ok or days is None:
+            return RegisterResponse(RegisterResult.ERROR, days_msg)
+
         locks = await acquire_registration_lock(emby_username, user.TELEGRAM_ID)
         if locks is None:
             return RegisterResponse(RegisterResult.ERROR, "当前注册请求较多，请稍后重试")
 
         emby = get_emby_client()
         try:
+            cap_ok, cap_msg = await UserService.check_emby_user_capacity()
+            if not cap_ok:
+                return RegisterResponse(RegisterResult.USER_LIMIT_REACHED, cap_msg)
+
             existing_emby = await emby.get_user_by_name(emby_username)
             if existing_emby:
                 return RegisterResponse(RegisterResult.EMBY_EXISTS, "该用户名在 Emby 中已存在")
@@ -485,11 +602,6 @@ class UserService:
 
             if not emby_user:
                 return RegisterResponse(RegisterResult.EMBY_ERROR, "创建 Emby 账户失败：未返回用户信息")
-
-            days = user.PENDING_EMBY_DAYS
-            if days is None:
-                days = int(RegisterConfig.EMBY_DIRECT_REGISTER_DAYS or 30)
-            days = UserService._normalize_code_days(days, default=30)
 
             # 管理员/白名单永久；其它账号按 days 计算
             if user.ROLE in (Role.ADMIN.value, Role.WHITE_LIST.value):
@@ -540,6 +652,10 @@ class UserService:
         emby = get_emby_client()
         
         try:
+            cap_ok, cap_msg = await UserService.check_emby_user_capacity()
+            if not cap_ok:
+                return RegisterResponse(RegisterResult.USER_LIMIT_REACHED, cap_msg)
+
             # 检查 Emby 用户名是否已存在
             existing_emby = await emby.get_user_by_name(username)
             if existing_emby:
@@ -674,11 +790,16 @@ class UserService:
     ) -> Tuple[bool, str]:
         """
         续期用户
-        
+
         :param user: 用户对象
         :param days: 续期天数
         :param reg_code: 续期码（可选）
         """
+        # 待开通 Emby 的用户没有真实到期概念，续期没有意义；后续 complete_emby_registration
+        # 会用 PENDING_EMBY_DAYS 重新计算到期时间，此处续期反而会被覆盖掉。
+        if not user.EMBYID:
+            return False, "用户尚未绑定 Emby 账号，无法续期。请先完成 Emby 账号开通。"
+
         if reg_code:
             from src.db.regcode import RegCodeOperate, Type as RegCodeType
             
@@ -861,6 +982,10 @@ class UserService:
             if user.EMBYID:
                 return False, "您已拥有 Emby 账户，无需使用注册码", None
 
+            cap_ok, cap_msg = await UserService.check_emby_user_capacity()
+            if not cap_ok:
+                return False, cap_msg, None
+
             emby_username = (emby_username or '').strip()
             if not emby_username:
                 return False, "使用注册码创建 Emby 账号时，请填写 Emby 用户名", None
@@ -915,6 +1040,10 @@ class UserService:
             
             # 如果没有 Emby 账户，自动创建
             if not user.EMBYID:
+                cap_ok, cap_msg = await UserService.check_emby_user_capacity()
+                if not cap_ok:
+                    return False, cap_msg, None
+
                 emby_username = (emby_username or '').strip()
                 if not emby_username:
                     return False, "使用白名单码创建 Emby 账号时，请填写 Emby 用户名", None
@@ -1178,6 +1307,13 @@ class UserService:
         if not embay_username and user.EMBYID:
             embay_username = user.USERNAME
 
+        is_pending_emby = bool(getattr(user, 'PENDING_EMBY', False)) and not user.EMBYID
+        # 待开通 Emby 时，覆盖默认的 expire_status 文案，避免显示"已过期"/"剩余 x"误导
+        if is_pending_emby:
+            expire_status = "未开通 Emby"
+        else:
+            expire_status = format_expire_time(user.EXPIRED_AT)
+
         info = {
             "uid": user.UID,
             "username": user.USERNAME,
@@ -1186,7 +1322,7 @@ class UserService:
             "role": user.ROLE,  # 保留数字角色
             "role_name": role_name,  # 添加角色名称
             "active": user.ACTIVE_STATUS,
-            "expire_status": format_expire_time(user.EXPIRED_AT),
+            "expire_status": expire_status,
             "expired_at": user.EXPIRED_AT,
             "bgm_mode": user.BGM_MODE,
             "avatar": user.AVATAR or None,
@@ -1194,7 +1330,7 @@ class UserService:
             "created_at": user.CREATE_AT or user.REGISTER_TIME,  # 前端兼容字段
             "emby_id": user.EMBYID,  # 添加 Emby ID
             "emby_username": embay_username,
-            "pending_emby": bool(getattr(user, 'PENDING_EMBY', False)) and not user.EMBYID,
+            "pending_emby": is_pending_emby,
             "pending_emby_days": getattr(user, 'PENDING_EMBY_DAYS', None),
         }
 
@@ -1276,6 +1412,10 @@ class UserService:
         email: Optional[str] = None
     ) -> RegisterResponse:
         """创建白名单用户（永久有效）"""
+        cap_ok, cap_msg = await UserService.check_emby_user_capacity()
+        if not cap_ok:
+            return RegisterResponse(RegisterResult.USER_LIMIT_REACHED, cap_msg)
+
         # 检查用户是否已存在
         existing_user = await UserOperate.get_user_by_telegram_id(telegram_id)
         if existing_user and existing_user.EMBYID:

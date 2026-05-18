@@ -7,6 +7,7 @@ import json
 import hmac
 import logging
 import re
+from pathlib import Path
 from urllib.parse import urlparse
 from typing import Any
 import time as _time
@@ -127,7 +128,11 @@ async def complete_emby_account_for_me():
     失败会保留 PENDING_EMBY 标记，前端可重复尝试。
 
     Request:
-        { "emby_username": "name", "emby_password": "Pwd1234X" }
+        {
+            "emby_username": "name",
+            "emby_password": "Pwd1234X",
+            "days": 30   // 可选，自由注册市场选择天数
+        }
     """
     user = g.current_user
     if user.EMBYID:
@@ -142,8 +147,20 @@ async def complete_emby_account_for_me():
     data = request.get_json() or {}
     emby_username = (data.get('emby_username') or '').strip()
     emby_password = data.get('emby_password') or ''
+    raw_days = data.get('days')
+    requested_days = None
+    if raw_days is not None and raw_days != '':
+        try:
+            requested_days = int(raw_days)
+        except (TypeError, ValueError):
+            return api_response(False, "days 必须是整数", code=400)
 
-    result = await UserService.complete_emby_registration(user, emby_username, emby_password)
+    result = await UserService.complete_emby_registration(
+        user,
+        emby_username,
+        emby_password,
+        requested_days=requested_days,
+    )
 
     if result.result.value == 'success':
         user_info = await UserService.get_user_info(result.user)
@@ -151,7 +168,7 @@ async def complete_emby_account_for_me():
             'user': user_info,
         })
 
-    code = 409 if result.result.value == 'emby_exists' else 400
+    code = 409 if result.result.value in ('emby_exists', 'user_limit_reached') else 400
     return api_response(False, result.message, code=code)
 
 
@@ -193,6 +210,10 @@ async def check_registration_available():
     
     available, msg = await UserService.check_registration_available()
     current_count = await UserService.get_registered_user_count()
+    emby_bound_count = await UserService.get_emby_bound_user_count()
+    emby_user_limit = UserService.get_emby_user_limit()
+    day_options = UserService.get_emby_direct_register_day_options()
+    custom_min, custom_max = UserService.get_emby_direct_register_custom_days_range()
     
     return api_response(True, msg, {
         'available': available,
@@ -203,6 +224,12 @@ async def check_registration_available():
         'allow_pending_register': RegisterConfig.ALLOW_PENDING_REGISTER,
         'emby_direct_register_enabled': RegisterConfig.EMBY_DIRECT_REGISTER_ENABLED,
         'emby_direct_register_days': RegisterConfig.EMBY_DIRECT_REGISTER_DAYS,
+        'emby_direct_register_day_options': day_options,
+        'emby_direct_register_allow_custom_days': RegisterConfig.EMBY_DIRECT_REGISTER_ALLOW_CUSTOM_DAYS,
+        'emby_direct_register_custom_days_min': custom_min,
+        'emby_direct_register_custom_days_max': custom_max,
+        'emby_user_limit': emby_user_limit,
+        'emby_bound_users': emby_bound_count,
     })
 
 
@@ -485,6 +512,10 @@ async def bind_emby_account():
         existing_bind = await UserOperate.get_user_by_embyid(emby_user.id)
         if existing_bind and existing_bind.UID != user.UID:
             return api_response(False, "该 Emby 账号已被其他用户绑定", code=400)
+
+        cap_ok, cap_msg = await UserService.check_emby_user_capacity()
+        if not cap_ok:
+            return api_response(False, cap_msg, code=400)
         
         # 绑定账号
         user.EMBYID = emby_user.id
@@ -498,21 +529,43 @@ async def bind_emby_account():
         other_data['emby_username'] = emby_user.name
         user.OTHER = json.dumps(other_data)
 
-        # 如果是管理员或白名单，保持永久有效期
+        # 决定开通后到期时间：
+        #   管理员/白名单 → 永久；
+        #   其它：优先使用注册码授予的 PENDING_EMBY_DAYS；否则用配置默认值；
+        #     days <= 0 视为永久（-1）；否则 now + days。
+        from src.core.utils import days_to_seconds, timestamp
+        from src.config import RegisterConfig
         if user.ROLE in (Role.ADMIN.value, Role.WHITE_LIST.value):
             user.EXPIRED_AT = 253402214400  # 9999-12-31
-        # 如果用户是未注册状态，更新为普通用户
-        elif user.ROLE == Role.UNRECOGNIZED.value:
-            user.ROLE = Role.NORMAL.value
-        
-        # 如果用户是待激活状态，激活用户
+        else:
+            if user.ROLE == Role.UNRECOGNIZED.value:
+                user.ROLE = Role.NORMAL.value
+
+            pending_days = getattr(user, 'PENDING_EMBY_DAYS', None)
+            if pending_days is None:
+                try:
+                    pending_days = int(RegisterConfig.EMBY_DIRECT_REGISTER_DAYS or 30)
+                except (TypeError, ValueError):
+                    pending_days = 30
+            try:
+                pending_days = int(pending_days)
+            except (TypeError, ValueError):
+                pending_days = 30
+            # 仅当当前不是合法的「正在使用的到期时间」时才覆盖
+            # （EXPIRED_AT in (-1, 0) 或已过期都视为需要重新计算；正数且未过期则保留原值，避免回退）
+            current_exp = user.EXPIRED_AT or 0
+            now_ts = timestamp()
+            if current_exp in (-1, 0) or current_exp < now_ts:
+                user.EXPIRED_AT = -1 if pending_days <= 0 else (now_ts + days_to_seconds(pending_days))
+
+        # 一次性清掉 PENDING 标记
+        user.PENDING_EMBY = False
+        user.PENDING_EMBY_DAYS = None
+
+        # 待激活账号补激活
         if not user.ACTIVE_STATUS:
             user.ACTIVE_STATUS = True
-            # 如果不是管理员/白名单且没有到期时间，设置默认30天
-            if user.EXPIRED_AT == -1 and user.ROLE == Role.NORMAL.value:
-                from src.core.utils import days_to_seconds, timestamp
-                user.EXPIRED_AT = timestamp() + days_to_seconds(30)
-        
+
         await UserOperate.update_user(user)
         
         logger.info(f"用户绑定 Emby 账号成功: {user.USERNAME} -> {emby_username} (ID: {emby_user.id})")
@@ -942,6 +995,52 @@ def _detect_image_extension(header: bytes) -> str | None:
         return 'webp'
     return None
 
+
+def _is_safe_upload_relative_url(value: str) -> bool:
+    """校验站内 uploads 相对 URL，阻止路径穿越。"""
+    if not value:
+        return False
+    s = value.strip()
+    if not s.startswith('/uploads/'):
+        return False
+    if '\\' in s or '\x00' in s:
+        return False
+
+    rel = Path(s.removeprefix('/uploads/'))
+    # 只允许普通相对路径片段
+    if rel.is_absolute() or any(part in ('..', '.', '') for part in rel.parts):
+        return False
+    return True
+
+
+def _get_upload_root_path() -> Path:
+    """获取并确保上传根目录存在。"""
+    from flask import current_app
+
+    root = Path(str(current_app.config.get('UPLOAD_FOLDER', ''))).resolve()
+    root.mkdir(parents=True, exist_ok=True)
+    return root
+
+
+def _resolve_upload_file_path(relative_url: str, required_subdir: str | None = None) -> Path | None:
+    """将 /uploads/... URL 解析为本地文件路径，并可限制到指定子目录。"""
+    if not _is_safe_upload_relative_url(relative_url):
+        return None
+
+    upload_root = _get_upload_root_path()
+    rel = Path(relative_url.removeprefix('/uploads/'))
+    file_path = (upload_root / rel).resolve()
+
+    if not file_path.is_relative_to(upload_root):
+        return None
+
+    if required_subdir:
+        required_root = (upload_root / required_subdir).resolve()
+        if not file_path.is_relative_to(required_root):
+            return None
+
+    return file_path
+
 async def _cleanup_expired_codes():
     """清理过期绑定码并维持上限。"""
     await TelegramBindCodeOperate.cleanup_expired()
@@ -1342,7 +1441,7 @@ def _is_valid_background_url(value: str) -> bool:
 
     # 站内相对路径
     if stripped.startswith('/'):
-        return True
+        return _is_safe_upload_relative_url(stripped)
 
     # CSS url("...") 包装：解析内部 URL 后递归校验
     url_match = _CSS_URL_RE.match(stripped)
@@ -1351,7 +1450,7 @@ def _is_valid_background_url(value: str) -> bool:
         if not inner:
             return False
         if inner.startswith('/'):
-            return True
+            return _is_safe_upload_relative_url(inner)
         try:
             parsed = urlparse(inner)
         except Exception:
@@ -1576,8 +1675,6 @@ async def upload_background_image():
     """
     import os
     import uuid
-    from pathlib import Path
-    from flask import current_app
     from src.core.utils import rate_limit_check
 
     # 检查认证
@@ -1620,21 +1717,24 @@ async def upload_background_image():
     file_size = file.tell()
     file.seek(0)
     
-    MAX_SIZE = current_app.config.get('MAX_CONTENT_LENGTH', 5 * 1024 * 1024)
+    MAX_SIZE = request.max_content_length or 5 * 1024 * 1024
     if file_size > MAX_SIZE:
         return api_response(False, f"文件过大，最大 {MAX_SIZE // (1024*1024)}MB", code=400)
     
     try:
         # 创建上传目录
-        upload_dir = os.path.join(current_app.config['UPLOAD_FOLDER'], 'backgrounds')
-        os.makedirs(upload_dir, exist_ok=True)
+        upload_root = _get_upload_root_path()
+        upload_dir = (upload_root / 'backgrounds').resolve()
+        if not upload_dir.is_relative_to(upload_root):
+            return api_response(False, "上传目录配置无效", code=500)
+        upload_dir.mkdir(parents=True, exist_ok=True)
         
         # 生成唯一文件名
         filename = f"{uuid.uuid4().hex}.{detected_ext}"
-        filepath = os.path.join(upload_dir, filename)
+        filepath = upload_dir / filename
         
         # 保存文件
-        file.save(filepath)
+        file.save(str(filepath))
         
         # 生成 URL
         file_url = f"/uploads/backgrounds/{filename}"
@@ -1688,8 +1788,6 @@ async def upload_avatar():
     """
     import os
     import uuid
-    from pathlib import Path
-    from flask import current_app
     from src.core.utils import rate_limit_check
 
     user = g.current_user
@@ -1733,15 +1831,18 @@ async def upload_avatar():
             return api_response(False, "文件大小不能超过 2MB", code=400)
         
         # 创建上传目录
-        upload_dir = os.path.join(current_app.config['UPLOAD_FOLDER'], 'avatars')
-        os.makedirs(upload_dir, exist_ok=True)
+        upload_root = _get_upload_root_path()
+        upload_dir = (upload_root / 'avatars').resolve()
+        if not upload_dir.is_relative_to(upload_root):
+            return api_response(False, "上传目录配置无效", code=500)
+        upload_dir.mkdir(parents=True, exist_ok=True)
         
         # 生成唯一文件名
         filename = f"{uuid.uuid4().hex}.{detected_ext}"
-        filepath = os.path.join(upload_dir, filename)
+        filepath = upload_dir / filename
         
         # 保存文件
-        file.save(filepath)
+        file.save(str(filepath))
         
         # 生成 URL
         avatar_url = f"/uploads/avatars/{filename}"
@@ -1771,15 +1872,10 @@ async def delete_avatar():
     
     # 删除头像文件
     try:
-        from pathlib import Path
-        from flask import current_app
-
         avatar_url = (user.AVATAR or '').strip()
         if avatar_url.startswith('/uploads/avatars/'):
-            upload_root = Path(current_app.config['UPLOAD_FOLDER']).resolve()
-            relative_path = avatar_url.removeprefix('/uploads/')
-            file_path = (upload_root / relative_path).resolve()
-            if str(file_path).startswith(str(upload_root)) and file_path.exists() and file_path.is_file():
+            file_path = _resolve_upload_file_path(avatar_url, required_subdir='avatars')
+            if file_path and file_path.exists() and file_path.is_file():
                 file_path.unlink()
     except Exception as e:
         logger.warning(f"删除头像文件失败: {e}")

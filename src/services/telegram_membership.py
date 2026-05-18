@@ -251,3 +251,157 @@ class TelegramMembershipService:
             else:
                 lines.append(f"• {label}")
         return "\n".join(lines)
+
+    @staticmethod
+    async def fetch_group_admin_ids(chat_id: Union[int, str]) -> set[int]:
+        """获取群组管理员/群主的 Telegram ID 集合（含 Bot 管理员）。"""
+        if not has_telegram_api_access():
+            return set()
+
+        async def _fetch(bot) -> set[int]:
+            ids: set[int] = set()
+            try:
+                members = await bot.get_chat_administrators(chat_id)
+            except Exception as exc:
+                logger.warning(f"获取群 {chat_id} 管理员失败: {exc}")
+                return ids
+            for m in members or []:
+                uid = getattr(getattr(m, "user", None), "id", None)
+                if isinstance(uid, int):
+                    ids.add(uid)
+            return ids
+
+        try:
+            return await run_bot_operation(_fetch, timeout=30)
+        except Exception as exc:
+            logger.warning(f"获取群 {chat_id} 管理员异常: {exc}")
+            return set()
+
+    @staticmethod
+    async def kick_unknown_members(
+        chat_id: Union[int, str],
+        candidate_ids: List[int],
+        *,
+        excluded_ids: set[int],
+        max_per_run: int = 200,
+    ) -> Dict[str, int | List[dict]]:
+        """对 ``candidate_ids`` 中的 TG 用户尝试踢出（先 ban 再 unban）。
+
+        - ``excluded_ids`` 中的 ID 不会被处理（管理员 / 系统已知活跃用户 / Bot 自身）。
+        - ``candidate_ids`` 应来自调用方根据"系统内不存在或已删除"的判定。
+        - Bot 必须是群管理员，且具有"封禁成员"权限。
+        - 踢出策略：``ban`` 后立即 ``unban``（``only_if_banned=True``），等同临时踢出，
+          被踢者将来仍可重新加入。
+        - 单次最多处理 ``max_per_run`` 个，避免触发 Telegram 限流。
+        """
+        result: Dict[str, int | List[dict]] = {
+            "scanned": 0,
+            "kicked": 0,
+            "skipped": 0,
+            "failed": 0,
+            "not_in_group": 0,
+            "details": [],
+        }
+        if not has_telegram_api_access():
+            result["details"].append({"reason": "telegram_unavailable"})
+            return result
+
+        seen: set[int] = set()
+        targets: List[int] = []
+        for raw in candidate_ids:
+            try:
+                tg_id = int(raw)
+            except (TypeError, ValueError):
+                continue
+            if tg_id <= 0 or tg_id in seen:
+                continue
+            seen.add(tg_id)
+            if tg_id in excluded_ids:
+                continue
+            targets.append(tg_id)
+            if len(targets) >= max_per_run:
+                break
+
+        if not targets:
+            return result
+
+        try:
+            from telegram.error import BadRequest, Forbidden, TelegramError
+        except Exception:
+            BadRequest = Forbidden = TelegramError = Exception  # type: ignore
+
+        async def _do(bot) -> Dict[str, int | List[dict]]:
+            # 把 Bot 自身 ID 加进排除集合
+            try:
+                me = await bot.get_me()
+                if getattr(me, "id", None):
+                    excluded_ids.add(int(me.id))
+            except Exception:
+                pass
+
+            local_result: Dict[str, int | List[dict]] = {
+                "scanned": len(targets),
+                "kicked": 0,
+                "skipped": 0,
+                "failed": 0,
+                "not_in_group": 0,
+                "details": [],
+            }
+
+            sem = asyncio.Semaphore(8)
+
+            async def _one(tg_id: int) -> None:
+                if tg_id in excluded_ids:
+                    local_result["skipped"] = int(local_result["skipped"]) + 1
+                    return
+                async with sem:
+                    # 先确认 ta 是否真的在群里 + 是否是管理员
+                    try:
+                        member = await bot.get_chat_member(chat_id, tg_id)
+                    except BadRequest:
+                        local_result["not_in_group"] = int(local_result["not_in_group"]) + 1
+                        return
+                    except (Forbidden, TelegramError) as exc:
+                        local_result["failed"] = int(local_result["failed"]) + 1
+                        local_result["details"].append(
+                            {"tg_id": tg_id, "error": f"查询成员失败: {exc}"}
+                        )
+                        return
+
+                    status = str(getattr(member, "status", "") or "").lower()
+                    if status in ("creator", "administrator"):
+                        local_result["skipped"] = int(local_result["skipped"]) + 1
+                        return
+                    if status in ("left", "kicked"):
+                        local_result["not_in_group"] = int(local_result["not_in_group"]) + 1
+                        return
+                    if getattr(getattr(member, "user", None), "is_bot", False):
+                        local_result["skipped"] = int(local_result["skipped"]) + 1
+                        return
+
+                    # ban → unban：实现"临时踢出"
+                    try:
+                        await bot.ban_chat_member(chat_id, tg_id)
+                    except (BadRequest, Forbidden, TelegramError) as exc:
+                        local_result["failed"] = int(local_result["failed"]) + 1
+                        local_result["details"].append(
+                            {"tg_id": tg_id, "error": f"踢出失败: {exc}"}
+                        )
+                        return
+                    try:
+                        await bot.unban_chat_member(chat_id, tg_id, only_if_banned=True)
+                    except Exception as exc:
+                        logger.debug(f"unban {tg_id} 异常（已踢出）: {exc}")
+
+                    local_result["kicked"] = int(local_result["kicked"]) + 1
+
+            await asyncio.gather(*(_one(tid) for tid in targets))
+            return local_result
+
+        try:
+            return await run_bot_operation(_do, timeout=120)
+        except Exception as exc:
+            logger.warning(f"批量踢出非系统成员异常 (chat={chat_id}): {exc}")
+            result["failed"] = int(result["failed"]) + 1
+            result["details"].append({"error": str(exc)})
+            return result
